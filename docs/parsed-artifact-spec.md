@@ -40,8 +40,9 @@ WeKnora 解析文档后，完整的解析结果没有被保留：
 
 - **不透明直存、原样返回**：系统不解析、不转换、不做跨引擎格式统一，只保证存取无损。消费方需自行理解对应引擎的格式。
 - 类型标记为 `engine_native`，并携带 `native_kind`（引擎自定义的产物种类名，如 `content_list`、`middle_json`、`model_output`）。
+- `native_kind` 的值由实现在写入时根据引擎输出映射确定（如 MinerU 的 `middle_json` 响应字段 → `native_kind=middle_json`，zip 内 `*_content_list_v2.json` → `native_kind=content_list_v2`）。调用方无需知晓底层文件路径或命名规则，通过产物列表端点发现可用值后直接按名读取即可。
 - 原生产物中的图片引用（如 `img_path` 指向 zip 内相对路径）**原样保留、不做改写**。客户端可用 `image_manifest` 中"原始引用 → 存储 URL"的映射自行关联——这是 image_manifest 存在的核心理由之一。
-- 原生产物采集**默认关闭**，按知识库（或租户）配置开启。关闭导致的原生产物缺失属预期行为。
+- 原生产物采集**默认关闭**，由租户级配置控制（租户的解析引擎配置中设有开关）。关闭导致的原生产物缺失属预期行为。
 - 原生产物是 best-effort：采集或保存失败仅记录告警，不阻断解析。
 
 ### 2.4 产物元数据
@@ -73,15 +74,73 @@ WeKnora 解析文档后，完整的解析结果没有被保留：
 
 ### 3.3 读取时
 
-- 提供按 `knowledge_id` 读取产物的 API：
-  - 返回 Markdown 产物内容及元数据：`knowledge_id`、`parse_attempt`、`engine`、`format`、`sha256`、`size`、`content`。
-  - 默认返回当前版本；允许指定保留范围内的历史 attempt。
-  - 提供产物列表能力：调用方可查询某 attempt 实际存在哪些产物（类型、native_kind、大小、sha256），再按需读取，包括 image_manifest 与原生产物。
-- **权限语义与 preview/download 完全一致**：Viewer 角色 + 经 knowledge_id 解析的知识库读权限校验，覆盖自有、组织共享、共享 Agent 三种访问路径。禁止仅凭产物 ID 或存储路径绕过知识库权限直读。
-- 图片引用的呈现：默认原样返回 `provider://` URL；调用方可通过参数要求将其解析为限时预签名 HTTP URL（复用现有文件预签名机制）。
+提供以下 API 端点，所有端点共享相同的权限模型（见下方权限小节）：
+
+#### 产物内容读取
+
+`GET /knowledge/{id}/artifact`
+
+返回指定类型产物的内容与元数据。
+
+**查询参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `type` | string | `markdown` | 产物类型：`markdown`、`image_manifest`，或 `engine_native`（此时须同时传 `native_kind`） |
+| `native_kind` | string | — | 仅 `type=engine_native` 时生效，指定原生产物种类（如 `content_list`） |
+| `attempt` | int | `0`（当前版本） | 指定历史 attempt 编号 |
+| `resolve_images` | bool | `false` | 为 `true` 时将内容中的 `provider://` URL 替换为限时预签名 HTTP URL（复用现有文件预签名机制）。注意：此时返回的 `content` 为重写后的形态，`sha256` 仍描述**存储态**产物，调用方仅能在未开启该参数时用 `sha256` 校验返回字节 |
+
+**成功响应：**
+
+```json
+{
+  "knowledge_id": "...",
+  "parse_attempt": 2,
+  "engine": "mineru",
+  "artifact_type": "markdown",
+  "format": "markdown",
+  "sha256": "abc123...",
+  "size": 12345,
+  "content": "# 标题\n..."
+}
+```
+
 - 无产物时（功能上线前解析的存量文档、解析尚未完成、解析失败且无历史版本）：返回明确的"产物不存在"错误（404 语义），错误信息应提示可通过 reparse 补齐，不返回空内容冒充产物。
-- 手工 Markdown 知识：同一端点应返回其 `metadata` 中的内容，行为对调用方透明；不强制迁移其存储方式。元数据字段映射：`engine` 固定为哨兵值 `manual`，`parse_attempt` 取 `ManualKnowledgeMetadata.Version`，`format` 为 `markdown`，`sha256`/`size` 按实际返回内容计算。
-- 响应必须有大小上界约定：超过上界的产物内容不得内联返回，此时 API 返回明确错误并指引调用方改用**流式下载**方式取回完整产物（下载能力属本功能范围）；行为模式固定如此，具体上界数值在实现时确定并写入 API 文档。
+- 手工 Markdown 知识：同一端点透明返回其 `metadata` 中的内容，行为对调用方透明；不强制迁移其存储方式。元数据字段映射：`engine` 固定为哨兵值 `manual`，`parse_attempt` 取 `ManualKnowledgeMetadata.Version`，`format` 为 `markdown`，`sha256`/`size` 按实际返回内容计算。
+- 响应有大小上界：超过上界的产物内容不得内联返回，此时 API 返回明确错误（含可读的消息与错误码），指引调用方改用流式下载方式取回（见下方下载端点）。上界数值在实现时确定并写入 API 文档。
+
+#### 产物列表
+
+`GET /knowledge/{id}/artifacts`
+
+返回指定知识在某 attempt 下实际存在的所有产物元数据（不含内容体），供调用方发现可用产物后再按需读取。
+
+**查询参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `attempt` | int | `0`（当前版本） | 指定历史 attempt 编号 |
+
+**成功响应：**
+
+```json
+[
+  {"artifact_type": "markdown",                                 "format": "markdown", "sha256": "...", "size": 12345, "created_at": "..."},
+  {"artifact_type": "image_manifest",                           "format": "json",     "sha256": "...", "size": 234,   "created_at": "..."},
+  {"artifact_type": "engine_native", "native_kind": "content_list", "format": "json",     "sha256": "...", "size": 5678,  "created_at": "..."}
+]
+```
+
+#### 产物下载
+
+`GET /knowledge/{id}/artifact/download`
+
+流式下载产物完整内容（无大小限制）。查询参数与读取端点一致（`type`、`native_kind`、`attempt`、`resolve_images`）。响应为二进制流，Content-Type 按产物格式设置。
+
+#### 权限
+
+所有产物端点的权限语义与 preview/download 完全一致：Viewer 角色 + 经 knowledge_id 解析的知识库读权限校验，覆盖自有、组织共享、共享 Agent 三种访问路径。禁止仅凭产物 ID 或存储路径绕过知识库权限直读。
 
 ### 3.4 删除时
 
@@ -135,23 +194,31 @@ MinerU 有两条接入路径，结果取回形态不同：
 
 **读取**
 
-- Given 解析完成的文档，When 调用产物读取 API，Then 返回 `content` 与 `sha256`，且 sha256 与内容实际哈希一致。
-- Given 调用方要求解析图片 URL，When 读取 Markdown 产物，Then 内容中 `provider://` 引用被替换为限时可访问的 HTTP URL。
+- Given 解析完成的文档，When 调用 `GET /knowledge/{id}/artifact?type=markdown`，Then 返回 `content` 与 `sha256`，且 sha256 与内容实际哈希一致。
+- Given 调用方要求解析图片 URL，When `GET /knowledge/{id}/artifact?type=markdown&resolve_images=true`，Then 内容中 `provider://` 引用被替换为限时可访问的 HTTP URL。
+
+**产物列表**
+
+- Given 解析完成的文档（引擎为 MinerU 且开启了原生产物采集），When `GET /knowledge/{id}/artifacts`，Then 返回的列表包含 `markdown`、`image_manifest` 以及 `engine_native`（如 `content_list`）。
+
+**大文件下载**
+
+- Given 产物内容超过内联大小上界，When `GET /knowledge/{id}/artifact?type=markdown`，Then 返回错误并指引调用方改用 `GET /knowledge/{id}/artifact/download?type=markdown`。
 
 **reparse**
 
-- Given 文档已有 attempt 1 的产物，When reparse 成功产生 attempt 2，Then 读取默认返回 attempt 2，且 attempt 1 产物仍可指定读取。
+- Given 文档已有 attempt 1 的产物，When reparse 成功产生 attempt 2，Then `GET /knowledge/{id}/artifact` 默认返回 attempt 2，且 `GET /knowledge/{id}/artifact?attempt=1` 仍可读取。
 - Given 文档已有 attempt 1 的产物，When reparse 失败，Then 当前版本仍为 attempt 1，读取不受影响。
 - Given reparse 失败前已写入部分产物，When 读取该失败 attempt 的产物，Then 返回"产物不存在"，且残留对象最终被清理、配额释放。
 - Given 文档已有 attempt 1、2 的产物，When attempt 3 解析成功，Then attempt 1 的产物被清理且配额相应扣减。
 
 **无产物**
 
-- Given 功能上线前解析完成的存量文档，When 读取产物，Then 返回"产物不存在"错误并提示可 reparse。
+- Given 功能上线前解析完成的存量文档，When `GET /knowledge/{id}/artifact`，Then 返回"产物不存在"错误并提示可 reparse。
 
 **权限**
 
-- Given 调用方对该知识所在知识库无读权限，When 读取产物，Then 请求被拒绝，行为与 preview 端点一致。
+- Given 调用方对该知识所在知识库无读权限，When `GET /knowledge/{id}/artifact`，Then 请求被拒绝，行为与 preview 端点一致。
 
 **删除与配额**
 
@@ -160,9 +227,9 @@ MinerU 有两条接入路径，结果取回形态不同：
 
 **原生产物**
 
-- Given 知识库开启原生产物采集且引擎为 MinerU，When 解析成功，Then 产物列表中包含 `engine_native` 产物（如 `content_list`），内容与引擎输出逐字节一致。
-- Given 未开启原生产物采集，When 解析成功，Then 仅存在规范层产物，读取原生产物返回"产物不存在"。
+- Given 租户开启原生产物采集且引擎为 MinerU，When 解析成功，Then `GET /knowledge/{id}/artifacts` 列表中包含 `engine_native` 产物（如 `content_list`），且 `GET /knowledge/{id}/artifact?type=engine_native&native_kind=content_list` 返回的内容与引擎输出逐字节一致。
+- Given 未开启原生产物采集，When 解析成功，Then 仅存在规范层产物，`GET /knowledge/{id}/artifact?type=engine_native&native_kind=content_list` 返回"产物不存在"。
 
 **手工知识**
 
-- Given 一个手工创建的 Markdown 知识，When 调用产物读取 API，Then 返回其 metadata 中的内容与版本号，调用方无需区分知识类型。
+- Given 一个手工创建的 Markdown 知识，When `GET /knowledge/{id}/artifact`，Then 返回其 metadata 中的内容与版本号，调用方无需区分知识类型。
