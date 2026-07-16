@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"mime"
 	"net/http"
 
 	"github.com/Tencent/WeKnora/internal/errors"
@@ -50,8 +51,12 @@ func (h *KnowledgeHandler) ReadArtifact(c *gin.Context) {
 
 	result, err := h.kgService.ReadArtifact(effCtx, id, req)
 	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
 		logger.ErrorWithFields(ctx, err, nil)
-		c.Error(err)
+		c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
 
@@ -93,8 +98,12 @@ func (h *KnowledgeHandler) ListArtifacts(c *gin.Context) {
 
 	result, err := h.kgService.ListArtifacts(effCtx, id, req)
 	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
 		logger.ErrorWithFields(ctx, err, nil)
-		c.Error(err)
+		c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
 
@@ -140,13 +149,26 @@ func (h *KnowledgeHandler) DownloadArtifact(c *gin.Context) {
 		return
 	}
 
-	reader, _, err := h.kgService.DownloadArtifact(effCtx, id, req)
+	reader, ct, err := h.kgService.DownloadArtifact(effCtx, id, req)
 	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
 		logger.ErrorWithFields(ctx, err, nil)
-		c.Error(err)
+		c.Error(errors.NewInternalServerError(err.Error()))
 		return
 	}
 	defer reader.Close()
 
-	c.DataFromReader(http.StatusOK, -1, "application/octet-stream", reader, nil)
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	c.Header("Content-Description", "File Transfer")
+	c.Header("Content-Transfer-Encoding", "binary")
+	c.Header("Content-Type", ct)
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "artifact"}))
+	c.Header("Cache-Control", "no-cache")
+	dataLen := reader
+	c.DataFromReader(http.StatusOK, -1, ct, dataLen, nil)
 }

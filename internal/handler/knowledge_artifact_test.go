@@ -20,13 +20,15 @@ import (
 
 type artifactTestStub struct {
 	interfaces.KnowledgeService
-	knowledge       *types.Knowledge
-	readArtifact    *types.ArtifactReadResponse
-	readErr         error
-	listArtifacts   []types.ArtifactListItem
-	listErr         error
-	downloadContent string
-	downloadErr     error
+	knowledge           *types.Knowledge
+	readArtifact        *types.ArtifactReadResponse
+	readErr             error
+	listArtifacts       []types.ArtifactListItem
+	listErr             error
+	downloadContent     string
+	downloadContentType string
+	downloadErr         error
+	lastReadRequest     types.ArtifactReadRequest
 }
 
 func (s *artifactTestStub) GetKnowledgeByIDOnly(_ context.Context, _ string) (*types.Knowledge, error) {
@@ -36,7 +38,8 @@ func (s *artifactTestStub) GetKnowledgeByIDOnly(_ context.Context, _ string) (*t
 	return s.knowledge, nil
 }
 
-func (s *artifactTestStub) ReadArtifact(_ context.Context, _ string, _ types.ArtifactReadRequest) (*types.ArtifactReadResponse, error) {
+func (s *artifactTestStub) ReadArtifact(_ context.Context, _ string, req types.ArtifactReadRequest) (*types.ArtifactReadResponse, error) {
+	s.lastReadRequest = req
 	return s.readArtifact, s.readErr
 }
 
@@ -48,7 +51,7 @@ func (s *artifactTestStub) DownloadArtifact(_ context.Context, _ string, _ types
 	if s.downloadErr != nil {
 		return nil, "", s.downloadErr
 	}
-	return io.NopCloser(strings.NewReader(s.downloadContent)), s.downloadContent, nil
+	return io.NopCloser(strings.NewReader(s.downloadContent)), s.downloadContentType, nil
 }
 
 func newArtifactTestRouter(stub *artifactTestStub) *gin.Engine {
@@ -141,6 +144,9 @@ func TestArtifactReadResolveImages(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("[3.3 resolve_images] status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
+	if !stub.lastReadRequest.ResolveImages {
+		t.Errorf("[3.3 resolve_images] resolve_images not forwarded to service")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +192,8 @@ func TestArtifactDownload(t *testing.T) {
 			TenantID:        42,
 			KnowledgeBaseID: "kb1",
 		},
-		downloadContent: "# downloaded markdown",
+		downloadContent:     "# downloaded markdown",
+		downloadContentType: "text/markdown",
 	}
 	r := newArtifactTestRouter(stub)
 
@@ -199,6 +206,12 @@ func TestArtifactDownload(t *testing.T) {
 	}
 	if w.Body.String() != "# downloaded markdown" {
 		t.Errorf("[3.3 产物下载] body = %q, want %q", w.Body.String(), "# downloaded markdown")
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/markdown" {
+		t.Errorf("[3.3 产物下载] Content-Type = %q, want %q", ct, "text/markdown")
+	}
+	if disp := w.Header().Get("Content-Disposition"); !strings.HasPrefix(disp, "attachment") {
+		t.Errorf("[3.3 产物下载] Content-Disposition = %q, want attachment", disp)
 	}
 }
 
