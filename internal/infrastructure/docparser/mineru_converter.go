@@ -104,8 +104,11 @@ func (c *MinerUReader) Read(ctx context.Context, req *types.ReadRequest) (*types
 type mineruFileParseResponse struct {
 	Results struct {
 		Document struct {
-			MDContent string            `json:"md_content"`
-			Images    map[string]string `json:"images"` // path -> "data:image/png;base64,..." or raw base64
+			MDContent   string            `json:"md_content"`
+			Images      map[string]string `json:"images"` // path -> "data:image/png;base64,..." or raw base64
+			ContentList json.RawMessage   `json:"content_list"`
+			MiddleJSON  json.RawMessage   `json:"middle_json"`
+			ModelOutput json.RawMessage   `json:"model_output"`
 		} `json:"document"`
 		Files struct {
 			MDContent   string            `json:"md_content"`
@@ -132,12 +135,19 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 		"end_page_id":         "99999",
 		"backend":             c.backend,
 		"response_format_zip": "false",
-		"return_middle_json":  "true",
-		"return_model_output": "true",
+		"return_middle_json":  "false",
+		"return_model_output": "false",
 		"return_content_list": "true",
 	}
 	if c.language != "" {
 		fields["lang_list"] = c.language
+	}
+	// Request engine-native data only when the tenant config enables it.
+	// Default off per spec Section 2.3 — avoids overhead on every parse.
+	if tenantInfo, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok &&
+		tenantInfo.ParserEngineConfig != nil && tenantInfo.ParserEngineConfig.EnableEngineNativeArtifacts {
+		fields["return_middle_json"] = "true"
+		fields["return_model_output"] = "true"
 	}
 	if c.vlmServerURL != "" && (strings.HasPrefix(c.backend, "vlm-http-client") || strings.HasPrefix(c.backend, "hybrid-http-client")) {
 		fields["server_url"] = c.vlmServerURL
@@ -207,7 +217,17 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 	// Prefer document when available, then fallback to files.
 	if result.Results.Document.MDContent != "" || len(result.Results.Document.Images) > 0 {
 		logger.Infof(context.Background(), "[MinerU] Using response path: results.document")
-		return result.Results.Document.MDContent, result.Results.Document.Images, nil, nil
+		nd := make(map[string][]byte)
+		if len(result.Results.Document.ContentList) > 0 {
+			nd["content_list"] = result.Results.Document.ContentList
+		}
+		if len(result.Results.Document.MiddleJSON) > 0 {
+			nd["middle_json"] = result.Results.Document.MiddleJSON
+		}
+		if len(result.Results.Document.ModelOutput) > 0 {
+			nd["model_output"] = result.Results.Document.ModelOutput
+		}
+		return result.Results.Document.MDContent, result.Results.Document.Images, nd, nil
 	}
 	if result.Results.Files.MDContent != "" || len(result.Results.Files.Images) > 0 {
 		logger.Infof(context.Background(), "[MinerU] Using response path: results.files")
