@@ -1064,3 +1064,17 @@ func (s *knowledgeService) SearchKnowledgeForScopes(ctx context.Context, scopes 
 	}
 	return s.repo.SearchKnowledgeInScopes(ctx, scopes, keyword, offset, limit, fileTypes)
 }
+
+// --- artifact stubs (Phantom 2 red, replaced in Phantom 3) ---
+
+func (s *knowledgeService) ReadArtifact(_ context.Context, _ string, _ types.ArtifactReadRequest) (*types.ArtifactReadResponse, error) {
+	return nil, errors.New("artifact service not yet implemented")
+}
+
+func (s *knowledgeService) ListArtifacts(_ context.Context, _ string, _ types.ArtifactListRequest) ([]types.ArtifactListItem, error) {
+	return nil, errors.New("artifact service not yet implemented")
+}
+
+func (s *knowledgeService) DownloadArtifact(_ context.Context, _ string, _ types.ArtifactReadRequest) (io.ReadCloser, string, error) {
+	return nil, "", errors.New("artifact service not yet implemented")
+}

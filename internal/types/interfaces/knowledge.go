@@ -224,6 +224,12 @@ type KnowledgeService interface {
 	SearchKnowledge(ctx context.Context, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, int64, error)
 	// SearchKnowledgeForScopes searches knowledge within the given (tenant_id, kb_id) scopes (e.g. for shared agent context).
 	SearchKnowledgeForScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, int64, error)
+	// ReadArtifact returns the content and metadata of a single artifact.
+	ReadArtifact(ctx context.Context, knowledgeID string, req types.ArtifactReadRequest) (*types.ArtifactReadResponse, error)
+	// ListArtifacts returns metadata for all artifacts under a knowledge/attempt.
+	ListArtifacts(ctx context.Context, knowledgeID string, req types.ArtifactListRequest) ([]types.ArtifactListItem, error)
+	// DownloadArtifact streams the full artifact content.
+	DownloadArtifact(ctx context.Context, knowledgeID string, req types.ArtifactReadRequest) (io.ReadCloser, string, error)
 }
 
 // KnowledgeRepository defines the interface for knowledge repositories.
