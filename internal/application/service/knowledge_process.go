@@ -3981,6 +3981,7 @@ func (s *knowledgeService) saveProcessArtifacts(
 		ServingURL   string   `json:"serving_url"`
 		OriginalRefs []string `json:"original_refs"`
 		MimeType     string   `json:"mime_type"`
+		Size         int64    `json:"size"`
 	}
 	manifest := make(map[string]*manifestEntry)
 	for _, img := range storedImages {
@@ -3991,22 +3992,21 @@ func (s *knowledgeService) saveProcessArtifacts(
 				ServingURL:   img.ServingURL,
 				OriginalRefs: []string{img.OriginalRef},
 				MimeType:     img.MimeType,
+				Size:         img.Size,
 			}
 		}
 	}
 
 	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to marshal image manifest: %v", err)
-		manifestBytes = []byte("{}")
+		return fmt.Errorf("failed to marshal image manifest: %w", err)
 	}
 	manifestSize := int64(len(manifestBytes))
 	manifestHash := sha256Hex(manifestBytes)
 
 	if err := s.checkQuotaAndSaveArtifact(ctx, tenantInfo, knowledge, attempt, engine,
 		types.ArtifactTypeImageManifest, "", "json", manifestHash, manifestSize, manifestBytes); err != nil {
-		logger.Warnf(ctx, "Failed to save image_manifest artifact: %v", err)
-		// manifest save failure does NOT block parsing (best-effort after markdown succeeds)
+		return fmt.Errorf("failed to save image_manifest artifact: %w", err)
 	}
 
 	// 3. Save engine-native artifacts (if tenant config enables them)
@@ -4025,12 +4025,48 @@ func (s *knowledgeService) saveProcessArtifacts(
 		}
 	}
 
-	// 4. Set current attempt on knowledge
+	// 4. Set current attempt on knowledge and cleanup old attempts (keep current + prev)
 	if s.artifactRepo != nil {
 		if err := s.artifactRepo.SetCurrentAttempt(ctx, knowledge.ID, attempt); err != nil {
 			logger.Warnf(ctx, "Failed to set current_attempt on knowledge %s: %v", knowledge.ID, err)
 		}
 		knowledge.CurrentAttempt = attempt
+
+		// Retention: delete artifacts for attempts older than (current - 1).
+		// Keep current attempt + the previous successful attempt.
+		oldestToKeep := attempt - 1
+		if oldestToKeep < 1 {
+			oldestToKeep = 1
+		}
+		for old := 1; old < oldestToKeep; old++ {
+			oldArtifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantInfo.ID, knowledge.ID, old)
+			if err != nil {
+				logger.Warnf(ctx, "Failed to list old artifacts for cleanup (attempt %d): %v", old, err)
+				continue
+			}
+			var oldTotalSize int64
+			for _, a := range oldArtifacts {
+				if a.StorageKey != "" {
+					if err := s.fileSvc.DeleteFile(ctx, a.StorageKey); err != nil {
+						logger.Warnf(ctx, "Failed to clean old artifact file %s: %v", a.StorageKey, err)
+					}
+				}
+				oldTotalSize += a.Size
+			}
+			if _, err := s.artifactRepo.DeleteArtifactsByAttempt(ctx, tenantInfo.ID, knowledge.ID, old); err != nil {
+				logger.Warnf(ctx, "Failed to clean old artifact rows (attempt %d): %v", old, err)
+			}
+			if oldTotalSize > 0 {
+				if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -oldTotalSize); err != nil {
+					logger.Warnf(ctx, "Failed to adjust storage for retention cleanup: %v", err)
+				} else {
+					tenantInfo.StorageUsed -= oldTotalSize
+					if tenantInfo.StorageUsed < 0 {
+						tenantInfo.StorageUsed = 0
+					}
+				}
+			}
+		}
 	}
 
 	return nil
