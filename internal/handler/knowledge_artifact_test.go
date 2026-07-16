@@ -742,3 +742,63 @@ func TestArtifactRetentionPrevKept(t *testing.T) {
 		t.Fatalf("[3.2 保留策略 prev] attempt 2 list status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// [3.5 配额] — quota exhausted returns error mentioning storage quota
+// ---------------------------------------------------------------------------
+
+func TestArtifactQuotaExhausted(t *testing.T) {
+	stub := &artifactTestStub{
+		knowledge: &types.Knowledge{
+			ID:              "k1",
+			TenantID:        42,
+			KnowledgeBaseID: "kb1",
+		},
+		readErr: errors.NewBadRequestError("storage quota exceeded (used 10737418240 + needed 512 > quota 10737418240)"),
+	}
+	r := newArtifactTestRouter(stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact?type=markdown", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("[3.5 配额] status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(w.Body.String()), "quota") {
+		t.Errorf("[3.5 配额] error must mention quota: %s", w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// [3.1 empty manifest] — image_manifest exists even when doc has no images
+// ---------------------------------------------------------------------------
+
+func TestArtifactManifestExistsForEmptyDoc(t *testing.T) {
+	stub := &artifactTestStub{
+		knowledge: &types.Knowledge{
+			ID:              "k1",
+			TenantID:        42,
+			KnowledgeBaseID: "kb1",
+		},
+		readArtifact: &types.ArtifactReadResponse{
+			KnowledgeID:  "k1",
+			ParseAttempt: 1,
+			Engine:       "builtin",
+			ArtifactType: types.ArtifactTypeImageManifest,
+			Format:       "json",
+			Sha256:       "emptyhash",
+			Size:         2,
+			Content:      "{}",
+		},
+	}
+	r := newArtifactTestRouter(stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact?type=image_manifest", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("[3.1 empty manifest] status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
