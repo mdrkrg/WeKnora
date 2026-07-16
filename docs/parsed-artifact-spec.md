@@ -152,7 +152,7 @@ WeKnora 解析文档后，完整的解析结果没有被保留：
 
 流式下载产物完整内容（无大小限制）。查询参数与读取端点一致（`type`、`native_kind`、`attempt`、`resolve_images`）。响应为二进制流，Content-Type 按产物格式设置。
 
-> 测试: `TestArtifactDownload`
+> 测试: `TestArtifactDownload`, `TestArtifactDownloadResolveImages`
 
 #### 权限
 

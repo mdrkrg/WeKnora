@@ -20,15 +20,18 @@ import (
 
 type artifactTestStub struct {
 	interfaces.KnowledgeService
-	knowledge           *types.Knowledge
-	readArtifact        *types.ArtifactReadResponse
-	readErr             error
-	listArtifacts       []types.ArtifactListItem
-	listErr             error
-	downloadContent     string
-	downloadContentType string
-	downloadErr         error
-	lastReadRequest     types.ArtifactReadRequest
+	knowledge             *types.Knowledge
+	readArtifact          *types.ArtifactReadResponse
+	readErr               error
+	readErrForAttempt     map[int]error
+	listArtifacts         []types.ArtifactListItem
+	listErr               error
+	downloadContent       string
+	downloadContentType   string
+	downloadErr           error
+	lastReadRequest       types.ArtifactReadRequest
+	lastListRequest       types.ArtifactListRequest
+	lastDownloadRequest   types.ArtifactReadRequest
 }
 
 func (s *artifactTestStub) GetKnowledgeByIDOnly(_ context.Context, _ string) (*types.Knowledge, error) {
@@ -40,14 +43,30 @@ func (s *artifactTestStub) GetKnowledgeByIDOnly(_ context.Context, _ string) (*t
 
 func (s *artifactTestStub) ReadArtifact(_ context.Context, _ string, req types.ArtifactReadRequest) (*types.ArtifactReadResponse, error) {
 	s.lastReadRequest = req
+	if s.readErrForAttempt != nil {
+		if e, ok := s.readErrForAttempt[req.Attempt]; ok {
+			return nil, e
+		}
+	}
+	if s.readArtifact != nil && s.readArtifact.Content != "" && req.ResolveImages {
+		resolved := strings.ReplaceAll(s.readArtifact.Content, "provider://", "https://presigned.example.com/")
+		if resolved != s.readArtifact.Content {
+			cp := *s.readArtifact
+			cp.Content = resolved
+			cp.Sha256 = "resolved"
+			return &cp, nil
+		}
+	}
 	return s.readArtifact, s.readErr
 }
 
-func (s *artifactTestStub) ListArtifacts(_ context.Context, _ string, _ types.ArtifactListRequest) ([]types.ArtifactListItem, error) {
+func (s *artifactTestStub) ListArtifacts(_ context.Context, _ string, req types.ArtifactListRequest) ([]types.ArtifactListItem, error) {
+	s.lastListRequest = req
 	return s.listArtifacts, s.listErr
 }
 
-func (s *artifactTestStub) DownloadArtifact(_ context.Context, _ string, _ types.ArtifactReadRequest) (io.ReadCloser, string, error) {
+func (s *artifactTestStub) DownloadArtifact(_ context.Context, _ string, req types.ArtifactReadRequest) (io.ReadCloser, string, error) {
+	s.lastDownloadRequest = req
 	if s.downloadErr != nil {
 		return nil, "", s.downloadErr
 	}
@@ -147,6 +166,12 @@ func TestArtifactReadResolveImages(t *testing.T) {
 	if !stub.lastReadRequest.ResolveImages {
 		t.Errorf("[3.3 resolve_images] resolve_images not forwarded to service")
 	}
+	if !strings.Contains(w.Body.String(), "https://presigned.example.com/") {
+		t.Errorf("[3.3 resolve_images] response content missing presigned URL replacement: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "provider://") {
+		t.Errorf("[3.3 resolve_images] response still contains provider:// URL: %s", w.Body.String())
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +237,33 @@ func TestArtifactDownload(t *testing.T) {
 	}
 	if disp := w.Header().Get("Content-Disposition"); !strings.HasPrefix(disp, "attachment") {
 		t.Errorf("[3.3 产物下载] Content-Disposition = %q, want attachment", disp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// [3.3 产物下载 resolve_images] — download endpoint forwards resolve_images
+// ---------------------------------------------------------------------------
+
+func TestArtifactDownloadResolveImages(t *testing.T) {
+	stub := &artifactTestStub{
+		knowledge: &types.Knowledge{
+			ID:              "k1",
+			TenantID:        42,
+			KnowledgeBaseID: "kb1",
+		},
+		downloadContent: "# content",
+	}
+	r := newArtifactTestRouter(stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact/download?type=markdown&resolve_images=true", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("[3.3 产物下载 resolve_images] status = %d, want 200", w.Code)
+	}
+	if !stub.lastDownloadRequest.ResolveImages {
+		t.Errorf("[3.3 产物下载 resolve_images] resolve_images not forwarded to download service")
 	}
 }
 
@@ -432,24 +484,29 @@ func TestArtifactReparsePartialInvisible(t *testing.T) {
 			Size:         100,
 			Content:      "stable",
 		},
+		readErrForAttempt: map[int]error{
+			2: errors.NewNotFoundError("artifact not found — reparse to generate"),
+		},
 	}
 	r := newArtifactTestRouter(stub)
 
-	// Current version still works (attempt 1 was never displaced).
-	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact?type=markdown", nil)
+	// Failed attempt 2 must not be readable — it was never committed as current.
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact?type=markdown&attempt=2", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("[3.2 reparse partial] current status = %d, want 200", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("[3.2 reparse partial] failed attempt 2 status = %d, want 404", w.Code)
 	}
 
-	// Failed attempt 2 must not be readable — it was never committed as current.
-	// This is enforced at the handler level: the stub always returns attempt 1
-	// because failed attempts are invisible. The test verifies the handler
-	// correctly delegates to the service without special-casing. The main
-	// assertion is that a failed reparse does not affect the default read.
-	if !strings.Contains(w.Body.String(), `"parse_attempt":1`) {
-		t.Errorf("[3.2 reparse partial] failed reparse must not affect current attempt: %s", w.Body.String())
+	// Current version (attempt 1) still works — it was never displaced.
+	req2 := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact?type=markdown", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("[3.2 reparse partial] current status = %d, want 200", w2.Code)
+	}
+	if !strings.Contains(w2.Body.String(), `"parse_attempt":1`) {
+		t.Errorf("[3.2 reparse partial] failed reparse must not affect current attempt: %s", w2.Body.String())
 	}
 }
 
@@ -587,6 +644,9 @@ func TestArtifactEngineNativeDisabled(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("[2.3 原生产物 disabled] status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	if stub.lastReadRequest.NativeKind != "content_list" {
+		t.Errorf("[2.3 原生产物 disabled] native_kind not forwarded: got %q", stub.lastReadRequest.NativeKind)
 	}
 }
 
@@ -741,10 +801,14 @@ func TestArtifactRetentionPrevKept(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("[3.2 保留策略 prev] attempt 2 list status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
+	if stub.lastListRequest.Attempt != 2 {
+		t.Errorf("[3.2 保留策略 prev] attempt param not forwarded: got %d, want 2", stub.lastListRequest.Attempt)
+	}
 }
 
 // ---------------------------------------------------------------------------
-// [3.5 配额] — quota exhausted returns error mentioning storage quota
+// [3.5 配额] — quota exhausted error surfaces through read API
+// (save-time quota enforcement is tested at the service layer)
 // ---------------------------------------------------------------------------
 
 func TestArtifactQuotaExhausted(t *testing.T) {
