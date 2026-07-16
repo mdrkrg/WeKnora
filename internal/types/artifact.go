@@ -1,6 +1,11 @@
 package types
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+)
 
 const (
 	ArtifactTypeMarkdown      = "markdown"
@@ -24,6 +29,14 @@ type KnowledgeArtifact struct {
 	Sha256       string    `json:"sha256"`
 	StorageKey   string    `json:"storage_key"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// BeforeCreate hook generates a UUID for new KnowledgeArtifact rows.
+func (a *KnowledgeArtifact) BeforeCreate(tx *gorm.DB) error {
+	if a.ID == "" {
+		a.ID = uuid.New().String()
+	}
+	return nil
 }
 
 // ArtifactReadRequest holds the query parameters for reading an artifact.
