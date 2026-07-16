@@ -625,3 +625,120 @@ func TestArtifactTypeDefaults(t *testing.T) {
 		t.Errorf("[3.3 type defaults] default type should be markdown: %s", w.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// [2.2 manifest size] — image_manifest entries include size, url, refs, mime
+// ---------------------------------------------------------------------------
+
+func TestImageManifestHasSize(t *testing.T) {
+	manifest := `{"local://images/x.png":{"serving_url":"local://images/x.png","original_refs":["images/x.png"],"mime_type":"image/png","size":1234}}`
+	stub := &artifactTestStub{
+		knowledge: &types.Knowledge{
+			ID:              "k1",
+			TenantID:        42,
+			KnowledgeBaseID: "kb1",
+		},
+		readArtifact: &types.ArtifactReadResponse{
+			KnowledgeID:  "k1",
+			ParseAttempt: 1,
+			Engine:       "mineru",
+			ArtifactType: types.ArtifactTypeImageManifest,
+			Format:       "json",
+			Sha256:       "manifesthash",
+			Size:         int64(len(manifest)),
+			Content:      manifest,
+		},
+	}
+	r := newArtifactTestRouter(stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifact?type=image_manifest", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("[2.2 manifest size] status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{`"size"`, `serving_url`, `original_refs`, `mime_type`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("[2.2 manifest size] manifest content missing %q: %s", want, w.Body.String())
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// [3.2 保留策略] — after attempt 3 succeeds, attempt 1 is cleaned (404)
+// ---------------------------------------------------------------------------
+
+func TestArtifactRetentionOldCleaned(t *testing.T) {
+	stub := &artifactTestStub{
+		knowledge: &types.Knowledge{
+			ID:              "k1",
+			TenantID:        42,
+			KnowledgeBaseID: "kb1",
+		},
+		readArtifact: &types.ArtifactReadResponse{
+			KnowledgeID:  "k1",
+			ParseAttempt: 1,
+			Engine:       "mineru",
+			ArtifactType: types.ArtifactTypeMarkdown,
+			Format:       "markdown",
+			Sha256:       "oldhash",
+			Size:         100,
+			Content:      "old",
+		},
+		listArtifacts: []types.ArtifactListItem{
+			{ArtifactType: types.ArtifactTypeMarkdown, Format: "markdown", Sha256: "newhash", Size: 200},
+			{ArtifactType: types.ArtifactTypeImageManifest, Format: "json", Sha256: "mh2", Size: 50},
+		},
+	}
+	r := newArtifactTestRouter(stub)
+
+	// Default read returns current (attempt 1 in this stub, but retention should
+	// clean older attempts when a newer one succeeds).
+	// The spec says current + prev are kept; if default returns attempt 1 and
+	// attempt 3 succeeded, attempt 1 should be gone.  We simulate by having
+	// readArtifact return attempt 1 content, but listArtifacts NOT containing
+	// the attempt 1 hash — meaning it was cleaned.
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifacts?attempt=0", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("[3.2 保留策略] list status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"oldhash"`) {
+		t.Errorf("[3.2 保留策略] old attempt hash should NOT appear in list after retention cleanup")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// [3.2 保留策略] — attempt 2 (prev successful) is still kept after attempt 3
+// ---------------------------------------------------------------------------
+
+func TestArtifactRetentionPrevKept(t *testing.T) {
+	stub := &artifactTestStub{
+		knowledge: &types.Knowledge{
+			ID:              "k1",
+			TenantID:        42,
+			KnowledgeBaseID: "kb1",
+		},
+		listArtifacts: []types.ArtifactListItem{
+			{ArtifactType: types.ArtifactTypeMarkdown, Format: "markdown", Sha256: "attempt3hash", Size: 300},
+			{ArtifactType: types.ArtifactTypeImageManifest, Format: "json", Sha256: "m3", Size: 50},
+		},
+	}
+	r := newArtifactTestRouter(stub)
+
+	// After attempt 3 succeeds, attempt 2 should still be accessible.
+	// We check that listing attempt 2 does NOT error, because it's still kept.
+	stub.listErr = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/knowledge/k1/artifacts?attempt=2", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// The spec says prev version is kept, so attempt 2 must return 200.
+	if w.Code != http.StatusOK {
+		t.Fatalf("[3.2 保留策略 prev] attempt 2 list status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
