@@ -76,7 +76,7 @@ func (c *MinerUReader) Read(ctx context.Context, req *types.ReadRequest) (*types
 
 	logger.Infof(context.Background(), "[MinerU] Parsing file=%s size=%d via %s", req.FileName, len(content), c.endpoint)
 
-	mdContent, imagesB64, err := c.callFileParse(ctx, content)
+	mdContent, imagesB64, nativeData, err := c.callFileParse(ctx, content)
 	if err != nil {
 		return nil, fmt.Errorf("MinerU file_parse: %w", err)
 	}
@@ -94,8 +94,9 @@ func (c *MinerUReader) Read(ctx context.Context, req *types.ReadRequest) (*types
 	logger.Infof(context.Background(), "[MinerU] Parsed successfully, markdown=%d chars, images=%d", len(mdContent), len(imageRefs))
 
 	return &types.ReadResult{
-		MarkdownContent: mdContent,
-		ImageRefs:       imageRefs,
+		MarkdownContent:  mdContent,
+		ImageRefs:        imageRefs,
+		EngineNativeData: nativeData,
 	}, nil
 }
 
@@ -107,13 +108,16 @@ type mineruFileParseResponse struct {
 			Images    map[string]string `json:"images"` // path -> "data:image/png;base64,..." or raw base64
 		} `json:"document"`
 		Files struct {
-			MDContent string            `json:"md_content"`
-			Images    map[string]string `json:"images"` // path -> "data:image/png;base64,..." or raw base64
+			MDContent   string            `json:"md_content"`
+			Images      map[string]string `json:"images"` // path -> "data:image/png;base64,..." or raw base64
+			ContentList json.RawMessage   `json:"content_list"`
+			MiddleJSON  json.RawMessage   `json:"middle_json"`
+			ModelOutput json.RawMessage   `json:"model_output"`
 		} `json:"files"`
 	} `json:"results"`
 }
 
-func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (string, map[string]string, error) {
+func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (string, map[string]string, map[string][]byte, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -128,8 +132,8 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 		"end_page_id":         "99999",
 		"backend":             c.backend,
 		"response_format_zip": "false",
-		"return_middle_json":  "false",
-		"return_model_output": "false",
+		"return_middle_json":  "true",
+		"return_model_output": "true",
 		"return_content_list": "true",
 	}
 	if c.language != "" {
@@ -145,16 +149,16 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 	// File part
 	part, err := writer.CreateFormFile("files", "document")
 	if err != nil {
-		return "", nil, fmt.Errorf("create form file: %w", err)
+		return "", nil, nil, fmt.Errorf("create form file: %w", err)
 	}
 	if _, err := part.Write(content); err != nil {
-		return "", nil, fmt.Errorf("write file content: %w", err)
+		return "", nil, nil, fmt.Errorf("write file content: %w", err)
 	}
 	writer.Close()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/file_parse", &body)
 	if err != nil {
-		return "", nil, fmt.Errorf("create request: %w", err)
+		return "", nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -164,18 +168,18 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 	})
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return "", nil, fmt.Errorf("HTTP request: %w", err)
+		return "", nil, nil, fmt.Errorf("HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf("MinerU API status %d: %s", resp.StatusCode, string(respBody))
+		return "", nil, nil, fmt.Errorf("MinerU API status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("read response body: %w", err)
+		return "", nil, nil, fmt.Errorf("read response body: %w", err)
 	}
 
 	// Dump raw response for debugging (truncate if too large)
@@ -194,7 +198,7 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 
 	var result mineruFileParseResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", nil, fmt.Errorf("decode response: %w", err)
+		return "", nil, nil, fmt.Errorf("decode response: %w", err)
 	}
 
 	// MinerU response schema differs by version/deployment:
@@ -203,15 +207,25 @@ func (c *MinerUReader) callFileParse(ctx context.Context, content []byte) (strin
 	// Prefer document when available, then fallback to files.
 	if result.Results.Document.MDContent != "" || len(result.Results.Document.Images) > 0 {
 		logger.Infof(context.Background(), "[MinerU] Using response path: results.document")
-		return result.Results.Document.MDContent, result.Results.Document.Images, nil
+		return result.Results.Document.MDContent, result.Results.Document.Images, nil, nil
 	}
 	if result.Results.Files.MDContent != "" || len(result.Results.Files.Images) > 0 {
 		logger.Infof(context.Background(), "[MinerU] Using response path: results.files")
-		return result.Results.Files.MDContent, result.Results.Files.Images, nil
+		nd := make(map[string][]byte)
+		if len(result.Results.Files.ContentList) > 0 {
+			nd["content_list"] = result.Results.Files.ContentList
+		}
+		if len(result.Results.Files.MiddleJSON) > 0 {
+			nd["middle_json"] = result.Results.Files.MiddleJSON
+		}
+		if len(result.Results.Files.ModelOutput) > 0 {
+			nd["model_output"] = result.Results.Files.ModelOutput
+		}
+		return result.Results.Files.MDContent, result.Results.Files.Images, nd, nil
 	}
 
 	logger.Errorf(context.Background(), "[MinerU] Response has no markdown/images under results.document or results.files")
-	return "", nil, nil
+	return "", nil, nil, nil
 }
 
 // processImages decodes base64 images from MinerU response and returns ImageRef list.

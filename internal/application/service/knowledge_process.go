@@ -3502,10 +3502,21 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		logger.Infof(ctx, "Resolved %d total images for knowledge %s", len(storedImages), knowledge.ID)
 	}
 
-	// Step 3: Split into chunks using Go chunker. Browser textareas normalize
-	// pasted content to LF, so normalize uploaded source text before calculating
-	// chunk boundaries as well.
+	// Step 2.5: Save parsed artifacts (markdown, image_manifest, engine-native)
+	// Browser textareas normalize pasted content to LF, so normalize uploaded source
+	// text before calculating chunk boundaries as well.
 	convertResult.MarkdownContent = chunker.NormalizeLineEndings(convertResult.MarkdownContent)
+
+	if err := s.saveProcessArtifacts(ctx, knowledge, payload.Attempt, convertResult, storedImages, &eff); err != nil {
+		logger.Errorf(ctx, "Failed to save canonical artifacts for knowledge %s: %v", knowledge.ID, err)
+		knowledge.ParseStatus = "failed"
+		knowledge.ErrorMessage = err.Error()
+		knowledge.UpdatedAt = time.Now()
+		s.repo.UpdateKnowledge(ctx, knowledge)
+		return nil
+	}
+
+	// Step 3: Split into chunks using Go chunker
 	chunkCfg := buildSplitterConfigFromChunking(eff.ChunkingConfig)
 
 	processOpts := ProcessChunksOptions{
@@ -3688,6 +3699,10 @@ func (s *knowledgeService) convert(
 		docOutput["pages"] = pages
 	}
 	s.endStage(ctx, knowledge.ID, types.StageDocReader, docOutput)
+	if result.Metadata == nil {
+		result.Metadata = make(map[string]string)
+	}
+	result.Metadata["resolved_engine"] = parserEngine
 	return result, nil
 }
 
@@ -3928,4 +3943,151 @@ func runKnowledgeListReparseSubmissions(
 		"%w: batch reparse submitted %d item(s) and failed %d: %w",
 		asynq.SkipRetry, outcome.Submitted, outcome.Failed, errors.Join(failures...),
 	)
+}
+
+// --- artifact persistence during parse ---
+
+func (s *knowledgeService) saveProcessArtifacts(
+	ctx context.Context,
+	knowledge *types.Knowledge,
+	attempt int,
+	result *types.ReadResult,
+	storedImages []docparser.StoredImage,
+	eff *types.EffectiveProcessConfig,
+) error {
+	if result == nil || knowledge == nil {
+		return nil
+	}
+
+	engine := result.Metadata["resolved_engine"]
+	if engine == "" {
+		engine = "unknown"
+	}
+
+	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+
+	// 1. Save markdown artifact (canonical, required)
+	markdownBytes := []byte(result.MarkdownContent)
+	markdownSize := int64(len(markdownBytes))
+	markdownHash := sha256Hex(markdownBytes)
+
+	if err := s.checkQuotaAndSaveArtifact(ctx, tenantInfo, knowledge, attempt, engine,
+		types.ArtifactTypeMarkdown, "", "markdown", markdownHash, markdownSize, markdownBytes); err != nil {
+		return fmt.Errorf("failed to save markdown artifact: %w", err)
+	}
+
+	// 2. Generate and save image_manifest (canonical, required)
+	type manifestEntry struct {
+		ServingURL   string   `json:"serving_url"`
+		OriginalRefs []string `json:"original_refs"`
+		MimeType     string   `json:"mime_type"`
+	}
+	manifest := make(map[string]*manifestEntry)
+	for _, img := range storedImages {
+		if e, ok := manifest[img.ServingURL]; ok {
+			e.OriginalRefs = append(e.OriginalRefs, img.OriginalRef)
+		} else {
+			manifest[img.ServingURL] = &manifestEntry{
+				ServingURL:   img.ServingURL,
+				OriginalRefs: []string{img.OriginalRef},
+				MimeType:     img.MimeType,
+			}
+		}
+	}
+
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to marshal image manifest: %v", err)
+		manifestBytes = []byte("{}")
+	}
+	manifestSize := int64(len(manifestBytes))
+	manifestHash := sha256Hex(manifestBytes)
+
+	if err := s.checkQuotaAndSaveArtifact(ctx, tenantInfo, knowledge, attempt, engine,
+		types.ArtifactTypeImageManifest, "", "json", manifestHash, manifestSize, manifestBytes); err != nil {
+		logger.Warnf(ctx, "Failed to save image_manifest artifact: %v", err)
+		// manifest save failure does NOT block parsing (best-effort after markdown succeeds)
+	}
+
+	// 3. Save engine-native artifacts (if tenant config enables them)
+	if s.artifactRepo != nil && tenantInfo.ParserEngineConfig != nil && tenantInfo.ParserEngineConfig.EnableEngineNativeArtifacts {
+		for nk, data := range result.EngineNativeData {
+			if len(data) == 0 {
+				continue
+			}
+			size := int64(len(data))
+			h := sha256Hex(data)
+			format := "json"
+			if err := s.checkQuotaAndSaveArtifact(ctx, tenantInfo, knowledge, attempt, engine,
+				types.ArtifactTypeEngineNative, nk, format, h, size, data); err != nil {
+				logger.Warnf(ctx, "Failed to save engine-native artifact %q: %v", nk, err)
+			}
+		}
+	}
+
+	// 4. Set current attempt on knowledge
+	if s.artifactRepo != nil {
+		if err := s.artifactRepo.SetCurrentAttempt(ctx, knowledge.ID, attempt); err != nil {
+			logger.Warnf(ctx, "Failed to set current_attempt on knowledge %s: %v", knowledge.ID, err)
+		}
+		knowledge.CurrentAttempt = attempt
+	}
+
+	return nil
+}
+
+func (s *knowledgeService) checkQuotaAndSaveArtifact(
+	ctx context.Context,
+	tenant *types.Tenant,
+	knowledge *types.Knowledge,
+	attempt int,
+	engine, artifactType, nativeKind, format, sha256 string,
+	size int64,
+	data []byte,
+) error {
+	if tenant.StorageQuota > 0 && tenant.StorageUsed+size > tenant.StorageQuota {
+		return fmt.Errorf("storage quota exceeded (used %d + needed %d > quota %d)",
+			tenant.StorageUsed, size, tenant.StorageQuota)
+	}
+
+	fileName := fmt.Sprintf("artifacts/%s/%d/%s", knowledge.ID, attempt, artifactType)
+	if nativeKind != "" {
+		fileName += "." + nativeKind
+	}
+
+	storageKey, err := s.fileSvc.SaveBytes(ctx, data, tenant.ID, fileName, false)
+	if err != nil {
+		return fmt.Errorf("save artifact bytes: %w", err)
+	}
+
+	if s.artifactRepo != nil {
+		artifact := &types.KnowledgeArtifact{
+			TenantID:     tenant.ID,
+			KnowledgeID:  knowledge.ID,
+			Attempt:      attempt,
+			ArtifactType: artifactType,
+			NativeKind:   nativeKind,
+			Engine:       engine,
+			Format:       format,
+			Size:         size,
+			Sha256:       sha256,
+			StorageKey:   storageKey,
+		}
+		if err := s.artifactRepo.CreateArtifact(ctx, artifact); err != nil {
+			// Roll back the just-written object so a failed row insert does not
+			// leave an orphan file that quota was never charged for.
+			if delErr := s.fileSvc.DeleteFile(ctx, storageKey); delErr != nil {
+				logger.Warnf(ctx, "Failed to remove artifact file %s after row create failure: %v", storageKey, delErr)
+			}
+			return fmt.Errorf("create artifact row: %w", err)
+		}
+	}
+
+	if err := s.tenantRepo.AdjustStorageUsed(ctx, tenant.ID, size); err != nil {
+		logger.Warnf(ctx, "Failed to adjust storage used for tenant %d by %d: %v", tenant.ID, size, err)
+	} else {
+		tenant.StorageUsed += size
+	}
+
+	return nil
 }

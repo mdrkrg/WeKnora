@@ -24,6 +24,11 @@ type ReadResult struct {
 	Error           string
 	IsAudio         bool   // true when the result contains raw audio data needing ASR transcription
 	AudioData       []byte // raw audio bytes for ASR processing
+	// EngineNativeData carries engine-specific outputs keyed by native_kind
+	// (e.g. "content_list", "middle_json", "model_output"). Best-effort:
+	// converters that don't produce native data leave this nil; the service
+	// only persists entries when engine-native collection is enabled.
+	EngineNativeData map[string][]byte
 }
 
 // ImageRef represents an image reference extracted from the document.

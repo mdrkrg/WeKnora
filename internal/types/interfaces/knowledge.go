@@ -334,3 +334,13 @@ type KnowledgeRepository interface {
 	// DeleteKnowledgeTagRelations deletes all tag relations for a knowledge entry.
 	DeleteKnowledgeTagRelations(ctx context.Context, knowledgeID string) error
 }
+
+// KnowledgeArtifactRepository defines the interface for knowledge artifact storage.
+type KnowledgeArtifactRepository interface {
+	CreateArtifact(ctx context.Context, artifact *types.KnowledgeArtifact) error
+	GetArtifactByType(ctx context.Context, tenantID uint64, knowledgeID string, attempt int, artifactType, nativeKind string) (*types.KnowledgeArtifact, error)
+	ListArtifacts(ctx context.Context, tenantID uint64, knowledgeID string, attempt int) ([]types.KnowledgeArtifact, error)
+	DeleteArtifactsByKnowledgeID(ctx context.Context, tenantID uint64, knowledgeID string) (int64, error)
+	DeleteArtifactsByAttempt(ctx context.Context, tenantID uint64, knowledgeID string, attempt int) (int64, error)
+	SetCurrentAttempt(ctx context.Context, knowledgeID string, attempt int) error
+}

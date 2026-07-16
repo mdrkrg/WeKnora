@@ -156,6 +156,36 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 		return nil
 	})
 
+	// Clean up parsed artifacts (markdown, image_manifest, engine-native)
+	wg.Go(func() error {
+		if s.artifactRepo == nil {
+			return nil
+		}
+		artifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantID, id, 0)
+		if err != nil {
+			logger.Warnf(ctx, "Failed to list artifacts for cleanup: %v", err)
+			return nil
+		}
+		var totalSize int64
+		for _, a := range artifacts {
+			if a.StorageKey != "" {
+				if err := kbFileSvc.DeleteFile(ctx, a.StorageKey); err != nil {
+					logger.Warnf(ctx, "Failed to delete artifact file %s: %v", a.StorageKey, err)
+				}
+			}
+			totalSize += a.Size
+		}
+		if _, err := s.artifactRepo.DeleteArtifactsByKnowledgeID(ctx, tenantID, id); err != nil {
+			logger.Warnf(ctx, "Failed to delete artifact rows: %v", err)
+		}
+		if totalSize > 0 {
+			if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantID, -totalSize); err != nil {
+				logger.Warnf(ctx, "Failed to adjust storage for artifact cleanup: %v", err)
+			}
+		}
+		return nil
+	})
+
 	// Delete the knowledge graph
 	wg.Go(func() error {
 		namespace := types.NameSpace{KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID}
