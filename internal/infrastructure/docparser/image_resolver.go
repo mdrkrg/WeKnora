@@ -60,6 +60,7 @@ type StoredImage struct {
 	OriginalRef string // reference in the original markdown
 	ServingURL  string // provider:// URL (e.g. local://images/xxx.png, minio://bucket/key)
 	MimeType    string
+	Size        int64 // size in bytes of the uploaded image data
 }
 
 // ImageResolver reads images from a DocReader ReadResult (inline bytes only)
@@ -184,6 +185,7 @@ func (r *ImageResolver) saveReferencedImage(
 				OriginalRef: refPath,
 				ServingURL:  cached.ServingURL,
 				MimeType:    cached.MimeType,
+				Size:        cached.Size,
 			}
 			savedRefs[refPath] = stored
 			return stored, true
@@ -209,6 +211,7 @@ func (r *ImageResolver) saveReferencedImage(
 		OriginalRef: refPath,
 		ServingURL:  servingURL,
 		MimeType:    ref.MimeType,
+		Size:        int64(len(ref.ImageData)),
 	}
 	savedRefs[refPath] = stored
 	if ref.Filename != "" {
