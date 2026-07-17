@@ -3507,7 +3507,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	// text before calculating chunk boundaries as well.
 	convertResult.MarkdownContent = chunker.NormalizeLineEndings(convertResult.MarkdownContent)
 
-	if err := s.saveProcessArtifacts(ctx, knowledge, payload.Attempt, convertResult, storedImages, &eff); err != nil {
+	if err := s.saveProcessArtifacts(ctx, knowledge, attempt, convertResult, storedImages, &eff); err != nil {
 		logger.Errorf(ctx, "Failed to save canonical artifacts for knowledge %s: %v", knowledge.ID, err)
 		knowledge.ParseStatus = "failed"
 		knowledge.ErrorMessage = err.Error()
@@ -3956,6 +3956,11 @@ func (s *knowledgeService) saveProcessArtifacts(
 	eff *types.EffectiveProcessConfig,
 ) error {
 	if result == nil || knowledge == nil {
+		return nil
+	}
+
+	if attempt <= 0 {
+		logger.Warnf(ctx, "saveProcessArtifacts called with invalid attempt=%d for knowledge %s; skipping", attempt, knowledge.ID)
 		return nil
 	}
 
