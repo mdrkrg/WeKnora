@@ -276,7 +276,7 @@ func (c *Client) GetFile(ctx context.Context, fileID int64) (*canvasFile, error)
 	return &file, nil
 }
 
-// DownloadFile fetches file metadata then downloads bytes (follows Canvas verifier URL).
+// DownloadFile fetches file metadata then downloads bytes with Bearer auth.
 func (c *Client) DownloadFile(ctx context.Context, fileID int64) ([]byte, string, string, error) {
 	meta, err := c.GetFile(ctx, fileID)
 	if err != nil {
@@ -286,7 +286,9 @@ func (c *Client) DownloadFile(ctx context.Context, fileID int64) ([]byte, string
 }
 
 // DownloadFromMeta downloads bytes using an already-fetched file metadata record,
-// avoiding a redundant GetFile round-trip.
+// avoiding a redundant GetFile round-trip. On 401 it refreshes the OAuth token
+// once and retries the same download URL (Canvas requires Bearer auth; verifier
+// query params are legacy and being removed).
 func (c *Client) DownloadFromMeta(ctx context.Context, meta *canvasFile) ([]byte, string, string, error) {
 	if meta == nil {
 		return nil, "", "", fmt.Errorf("canvas file meta is nil")
@@ -304,7 +306,10 @@ func (c *Client) DownloadFromMeta(ctx context.Context, meta *canvasFile) ([]byte
 			return nil, "", "", err2
 		}
 	}
+	return c.downloadFromMetaRetry(ctx, meta, true)
+}
 
+func (c *Client) downloadFromMetaRetry(ctx context.Context, meta *canvasFile, allowRefresh bool) ([]byte, string, string, error) {
 	if err := c.ensureValidToken(ctx); err != nil {
 		return nil, "", "", err
 	}
@@ -323,22 +328,32 @@ func (c *Client) DownloadFromMeta(ctx context.Context, meta *canvasFile) ([]byte
 		return nil, "", "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		data, err := readWithLimit(resp.Body, maxDownloadSize)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("download file %d: %w", meta.ID, err)
+		}
+		name := meta.DisplayName
+		if name == "" {
+			name = meta.Filename
+		}
+		ct := meta.ContentType
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		return data, name, ct, nil
+	case resp.StatusCode == http.StatusUnauthorized:
+		if allowRefresh {
+			if refreshErr := c.RefreshAccessToken(ctx); refreshErr == nil {
+				return c.downloadFromMetaRetry(ctx, meta, false)
+			}
+		}
+		return nil, "", "", fmt.Errorf("%w: download file %d: status %d", datasource.ErrInvalidCredentials, meta.ID, resp.StatusCode)
+	default:
 		return nil, "", "", fmt.Errorf("download file %d: status %d", meta.ID, resp.StatusCode)
 	}
-	data, err := readWithLimit(resp.Body, maxDownloadSize)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("download file %d: %w", meta.ID, err)
-	}
-	name := meta.DisplayName
-	if name == "" {
-		name = meta.Filename
-	}
-	ct := meta.ContentType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	return data, name, ct, nil
 }
 
 func readWithLimit(r io.Reader, limit int64) ([]byte, error) {

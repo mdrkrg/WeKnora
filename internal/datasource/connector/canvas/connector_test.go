@@ -379,3 +379,63 @@ func TestFetchIncremental_DirectFileUsesSingleGetFile(t *testing.T) {
 		t.Fatalf("unchanged direct file must not download, got %d", got)
 	}
 }
+
+func TestDownloadFromMeta_401RefreshesAndRetries(t *testing.T) {
+	var downloadHits atomic.Int64
+	var refreshHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		refreshHits.Add(1)
+		_ = r.ParseForm()
+		if r.Form.Get("grant_type") != "refresh_token" {
+			t.Fatalf("unexpected grant_type %q", r.Form.Get("grant_type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	mux.HandleFunc("/files/1/download", func(w http.ResponseWriter, r *http.Request) {
+		downloadHits.Add(1)
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer new-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = io.WriteString(w, "file-bytes")
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cli, err := NewClient(&Config{
+		BaseURL:      srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		AccessToken:  "old-tok",
+		RefreshToken: "ref-1",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	data, name, ct, err := cli.DownloadFromMeta(context.Background(), &canvasFile{
+		ID:          1,
+		DisplayName: "a.txt",
+		ContentType: "text/plain",
+		URL:         srv.URL + "/files/1/download",
+	})
+	if err != nil {
+		t.Fatalf("DownloadFromMeta: %v", err)
+	}
+	if string(data) != "file-bytes" || name != "a.txt" || ct != "text/plain" {
+		t.Fatalf("got data=%q name=%q ct=%q", data, name, ct)
+	}
+	if downloadHits.Load() != 2 {
+		t.Fatalf("download hits=%d want 2 (401 then retry)", downloadHits.Load())
+	}
+	if refreshHits.Load() != 1 {
+		t.Fatalf("refresh hits=%d want 1", refreshHits.Load())
+	}
+	if cli.cfg.AccessToken != "new-tok" {
+		t.Fatalf("token not rotated, got %q", cli.cfg.AccessToken)
+	}
+}
