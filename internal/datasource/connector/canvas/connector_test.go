@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -592,6 +593,141 @@ func TestDownloadFromMeta_401RefreshesAndRetries(t *testing.T) {
 	}
 	if refreshHits.Load() != 1 {
 		t.Fatalf("refresh hits=%d want 1", refreshHits.Load())
+	}
+	if cli.cfg.AccessToken != "new-tok" {
+		t.Fatalf("token not rotated, got %q", cli.cfg.AccessToken)
+	}
+}
+
+func TestRefreshAccessToken_ConcurrentSingleflight(t *testing.T) {
+	var refreshHits atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		refreshHits.Add(1)
+		once.Do(func() { close(started) })
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cli, err := NewClient(&Config{
+		BaseURL:      srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		AccessToken:  "old-tok",
+		RefreshToken: "ref-1",
+		ExpiresAt:    time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- cli.RefreshAccessToken(context.Background())
+		}()
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for refresh to start")
+	}
+	// Give siblings time to join the singleflight before the leader finishes.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("RefreshAccessToken: %v", err)
+		}
+	}
+	if got := refreshHits.Load(); got != 1 {
+		t.Fatalf("refresh hits=%d want 1 (singleflight)", got)
+	}
+	if cli.cfg.AccessToken != "new-tok" {
+		t.Fatalf("token not rotated, got %q", cli.cfg.AccessToken)
+	}
+}
+
+func TestDoJSON_Concurrent401Singleflight(t *testing.T) {
+	var refreshHits atomic.Int64
+	var apiHits atomic.Int64
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var refreshOnce sync.Once
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		refreshHits.Add(1)
+		refreshOnce.Do(func() { close(refreshStarted) })
+		<-releaseRefresh
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	mux.HandleFunc("/api/v1/users/self", func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		if r.Header.Get("Authorization") != "Bearer new-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"errors":[{"message":"unauthorized"}]}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":1}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cli, err := NewClient(&Config{
+		BaseURL:      srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		AccessToken:  "old-tok",
+		RefreshToken: "ref-1",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := cli.doJSON(context.Background(), http.MethodGet, "/api/v1/users/self", nil)
+			errs <- err
+		}()
+	}
+
+	select {
+	case <-refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for refresh to start")
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(releaseRefresh)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("doJSON: %v", err)
+		}
+	}
+	if got := refreshHits.Load(); got != 1 {
+		t.Fatalf("refresh hits=%d want 1 (singleflight)", got)
 	}
 	if cli.cfg.AccessToken != "new-tok" {
 		t.Fatalf("token not rotated, got %q", cli.cfg.AccessToken)

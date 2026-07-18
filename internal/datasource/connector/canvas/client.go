@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/Tencent/WeKnora/internal/datasource"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -30,7 +32,8 @@ type Client struct {
 	httpClient *http.Client
 	onUpdate   func(context.Context, map[string]interface{}) error
 
-	mu sync.Mutex
+	mu        sync.Mutex
+	refreshSF singleflight.Group
 }
 
 // NewClient builds a Canvas API client. onUpdate is optional and is invoked
@@ -87,7 +90,16 @@ func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) err
 }
 
 // RefreshAccessToken uses the refresh_token grant.
+// Concurrent callers share one token exchange via singleflight so Canvas
+// does not see redundant refresh_token rotations.
 func (c *Client) RefreshAccessToken(ctx context.Context) error {
+	_, err, _ := c.refreshSF.Do("refresh", func() (interface{}, error) {
+		return nil, c.refreshAccessTokenOnce(ctx)
+	})
+	return err
+}
+
+func (c *Client) refreshAccessTokenOnce(ctx context.Context) error {
 	c.mu.Lock()
 	refresh := c.cfg.RefreshToken
 	c.mu.Unlock()
@@ -100,6 +112,19 @@ func (c *Client) RefreshAccessToken(ctx context.Context) error {
 	form.Set("client_secret", c.cfg.ClientSecret)
 	form.Set("refresh_token", refresh)
 	return c.applyTokenForm(ctx, form)
+}
+
+// refreshIfTokenUnchanged refreshes only when the in-memory access token is
+// still the one that just received a 401. If another goroutine already
+// rotated it, this is a no-op so the caller can retry with the new token.
+func (c *Client) refreshIfTokenUnchanged(ctx context.Context, usedToken string) error {
+	c.mu.Lock()
+	current := c.cfg.AccessToken
+	c.mu.Unlock()
+	if current != usedToken {
+		return nil
+	}
+	return c.RefreshAccessToken(ctx)
 }
 
 func (c *Client) applyTokenForm(ctx context.Context, form url.Values) error {
@@ -163,11 +188,7 @@ func (c *Client) ensureValidToken(ctx context.Context) error {
 	if token == "" {
 		return fmt.Errorf("%w: canvas access_token missing; complete OAuth authorization first", datasource.ErrInvalidCredentials)
 	}
-	needsRefresh := false
-	if !exp.IsZero() && time.Now().Add(tokenSkew).After(exp) {
-		needsRefresh = true
-	}
-	if !needsRefresh {
+	if exp.IsZero() || !time.Now().Add(tokenSkew).After(exp) {
 		return nil
 	}
 	if refresh == "" {
@@ -346,7 +367,7 @@ func (c *Client) downloadFromMetaRetry(ctx context.Context, meta *canvasFile, al
 		return data, name, ct, nil
 	case resp.StatusCode == http.StatusUnauthorized:
 		if allowRefresh {
-			if refreshErr := c.RefreshAccessToken(ctx); refreshErr == nil {
+			if refreshErr := c.refreshIfTokenUnchanged(ctx, token); refreshErr == nil {
 				return c.downloadFromMetaRetry(ctx, meta, false)
 			}
 		}
@@ -462,7 +483,7 @@ func (c *Client) doJSONWithLinkRetry(ctx context.Context, method, path string, b
 		return respBody, resp.Header.Get("Link"), nil
 	case resp.StatusCode == 401:
 		if allowRefresh {
-			if refreshErr := c.RefreshAccessToken(ctx); refreshErr == nil {
+			if refreshErr := c.refreshIfTokenUnchanged(ctx, token); refreshErr == nil {
 				return c.doJSONWithLinkRetry(ctx, method, path, body, false)
 			}
 		}
