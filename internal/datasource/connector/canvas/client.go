@@ -276,14 +276,23 @@ func (c *Client) GetFile(ctx context.Context, fileID int64) (*canvasFile, error)
 	return &file, nil
 }
 
-// DownloadFile downloads file bytes (follows Canvas verifier URL).
+// DownloadFile fetches file metadata then downloads bytes (follows Canvas verifier URL).
 func (c *Client) DownloadFile(ctx context.Context, fileID int64) ([]byte, string, string, error) {
 	meta, err := c.GetFile(ctx, fileID)
 	if err != nil {
 		return nil, "", "", err
 	}
+	return c.DownloadFromMeta(ctx, meta)
+}
+
+// DownloadFromMeta downloads bytes using an already-fetched file metadata record,
+// avoiding a redundant GetFile round-trip.
+func (c *Client) DownloadFromMeta(ctx context.Context, meta *canvasFile) ([]byte, string, string, error) {
+	if meta == nil {
+		return nil, "", "", fmt.Errorf("canvas file meta is nil")
+	}
 	if meta.URL == "" {
-		return nil, "", "", fmt.Errorf("canvas file %d has empty download url", fileID)
+		return nil, "", "", fmt.Errorf("canvas file %d has empty download url", meta.ID)
 	}
 	if err := datasource.ValidateConnectorBaseURL(meta.URL); err != nil {
 		// Download URLs may be on the same host with query params; validate host via parsed URL.
@@ -315,11 +324,11 @@ func (c *Client) DownloadFile(ctx context.Context, fileID int64) ([]byte, string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", "", fmt.Errorf("download file %d: status %d", fileID, resp.StatusCode)
+		return nil, "", "", fmt.Errorf("download file %d: status %d", meta.ID, resp.StatusCode)
 	}
 	data, err := readWithLimit(resp.Body, maxDownloadSize)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("download file %d: %w", fileID, err)
+		return nil, "", "", fmt.Errorf("download file %d: %w", meta.ID, err)
 	}
 	name := meta.DisplayName
 	if name == "" {

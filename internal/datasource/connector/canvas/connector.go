@@ -236,9 +236,46 @@ func (c *Connector) walkFolderAncestors(
 	}
 }
 
+// collectedFile is a file discovered during tree walk, optionally with list metadata.
+type collectedFile struct {
+	ID     int64
+	Source string
+	Meta   *canvasFile // from ListFiles; nil for directly selected file resources
+}
+
 // FetchAll downloads all files under the selected courses/folders/files.
 func (c *Connector) FetchAll(
 	ctx context.Context, config *types.DataSourceConfig, resourceIDs []string,
+) ([]types.FetchedItem, error) {
+	return c.fetch(ctx, config, resourceIDs, time.Time{})
+}
+
+// FetchIncremental downloads only files updated since the last sync cursor.
+// Listing still walks the selected tree (Canvas has no folder-scoped "since" API),
+// but downloads are skipped when ListFiles/GetFile updated_at is not after the cursor.
+func (c *Connector) FetchIncremental(
+	ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor,
+) ([]types.FetchedItem, *types.SyncCursor, error) {
+	since := time.Time{}
+	if cursor != nil {
+		since = cursor.LastSyncTime
+	}
+	items, err := c.fetch(ctx, config, config.ResourceIDs, since)
+	if err != nil {
+		var partial *datasource.PartialFetchError
+		if !errors.As(err, &partial) {
+			return nil, cursor, err
+		}
+	}
+	next := nextIncrementalCursor(cursor, err, time.Now().UTC())
+	if err != nil {
+		return items, next, err
+	}
+	return items, next, nil
+}
+
+func (c *Connector) fetch(
+	ctx context.Context, config *types.DataSourceConfig, resourceIDs []string, since time.Time,
 ) ([]types.FetchedItem, error) {
 	cli, _, err := clientFromConfig(config)
 	if err != nil {
@@ -248,7 +285,7 @@ func (c *Connector) FetchAll(
 		return nil, nil
 	}
 
-	fileIDs := map[int64]string{} // fileID -> source resource id
+	files := map[int64]collectedFile{}
 	var warnings []string
 
 	for _, rid := range resourceIDs {
@@ -259,9 +296,9 @@ func (c *Connector) FetchAll(
 		}
 		switch kind {
 		case resourceTypeFile:
-			fileIDs[id] = rid
+			files[id] = collectedFile{ID: id, Source: rid}
 		case resourceTypeFolder:
-			if err := c.collectFilesUnderFolder(ctx, cli, id, rid, fileIDs); err != nil {
+			if err := c.collectFilesUnderFolder(ctx, cli, id, rid, files); err != nil {
 				warnings = append(warnings, err.Error())
 			}
 		case resourceTypeCourse:
@@ -270,32 +307,41 @@ func (c *Connector) FetchAll(
 				warnings = append(warnings, err.Error())
 				continue
 			}
-			if err := c.collectFilesUnderFolder(ctx, cli, root.ID, rid, fileIDs); err != nil {
+			if err := c.collectFilesUnderFolder(ctx, cli, root.ID, rid, files); err != nil {
 				warnings = append(warnings, err.Error())
 			}
 		}
 	}
 
-	items := make([]types.FetchedItem, 0, len(fileIDs))
-	for fileID, source := range fileIDs {
-		data, name, contentType, err := cli.DownloadFile(ctx, fileID)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("file %d: %v", fileID, err))
+	items := make([]types.FetchedItem, 0, len(files))
+	for _, cf := range files {
+		meta := cf.Meta
+		if meta == nil || meta.URL == "" {
+			resolved, getErr := cli.GetFile(ctx, cf.ID)
+			if getErr != nil {
+				warnings = append(warnings, fmt.Sprintf("file %d: %v", cf.ID, getErr))
+				continue
+			}
+			meta = resolved
+		}
+		updatedAt, _ := time.Parse(time.RFC3339, meta.UpdatedAt)
+		if !since.IsZero() && !updatedAt.IsZero() && !updatedAt.After(since) {
 			continue
 		}
-		updatedAt := time.Time{}
-		if meta, err := cli.GetFile(ctx, fileID); err == nil {
-			updatedAt, _ = time.Parse(time.RFC3339, meta.UpdatedAt)
+		data, name, contentType, err := cli.DownloadFromMeta(ctx, meta)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("file %d: %v", cf.ID, err))
+			continue
 		}
 		items = append(items, types.FetchedItem{
-			ExternalID:       encodeFileID(fileID),
+			ExternalID:       encodeFileID(cf.ID),
 			Title:            name,
 			Content:          data,
 			ContentType:      contentType,
 			FileName:         sanitizeFileName(name),
 			URL:              "",
 			UpdatedAt:        updatedAt,
-			SourceResourceID: source,
+			SourceResourceID: cf.Source,
 			Metadata: map[string]string{
 				"channel": types.ChannelCanvas,
 			},
@@ -312,14 +358,15 @@ func (c *Connector) FetchAll(
 }
 
 func (c *Connector) collectFilesUnderFolder(
-	ctx context.Context, cli *Client, folderID int64, source string, out map[int64]string,
+	ctx context.Context, cli *Client, folderID int64, source string, out map[int64]collectedFile,
 ) error {
-	files, err := cli.ListFiles(ctx, folderID)
+	listed, err := cli.ListFiles(ctx, folderID)
 	if err != nil {
 		return err
 	}
-	for _, f := range files {
-		out[f.ID] = source
+	for i := range listed {
+		f := listed[i]
+		out[f.ID] = collectedFile{ID: f.ID, Source: source, Meta: &f}
 	}
 	subs, err := cli.ListFolders(ctx, folderID)
 	if err != nil {
@@ -331,39 +378,6 @@ func (c *Connector) collectFilesUnderFolder(
 		}
 	}
 	return nil
-}
-
-// FetchIncremental re-fetches files updated since the last sync cursor.
-func (c *Connector) FetchIncremental(
-	ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor,
-) ([]types.FetchedItem, *types.SyncCursor, error) {
-	items, err := c.FetchAll(ctx, config, config.ResourceIDs)
-	if err != nil {
-		var partial *datasource.PartialFetchError
-		if !errors.As(err, &partial) {
-			return nil, cursor, err
-		}
-	}
-
-	since := time.Time{}
-	if cursor != nil {
-		since = cursor.LastSyncTime
-	}
-	filtered := items
-	if !since.IsZero() {
-		filtered = filtered[:0]
-		for _, item := range items {
-			if item.UpdatedAt.IsZero() || item.UpdatedAt.After(since) {
-				filtered = append(filtered, item)
-			}
-		}
-	}
-
-	next := nextIncrementalCursor(cursor, err, time.Now().UTC())
-	if err != nil {
-		return filtered, next, err
-	}
-	return filtered, next, nil
 }
 
 func nextIncrementalCursor(cursor *types.SyncCursor, fetchErr error, now time.Time) *types.SyncCursor {
