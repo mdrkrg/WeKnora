@@ -119,15 +119,62 @@ func TestNextIncrementalCursorKeepsHighWaterMarkOnPartialFailure(t *testing.T) {
 	previous := &types.SyncCursor{LastSyncTime: time.Unix(100, 0).UTC()}
 	now := time.Unix(200, 0).UTC()
 	partial := &datasource.PartialFetchError{Details: []string{"file 2 failed"}}
+	current := map[string]map[string]string{
+		"folder:10": {"file:1": "2024-01-01T00:00:00Z"},
+	}
 
-	if got := nextIncrementalCursor(previous, partial, now); got != previous {
-		t.Fatalf("partial failure advanced cursor: got %#v want %#v", got, previous)
+	got := nextIncrementalCursor(previous, nil, current, nil, partial, now)
+	if got == nil {
+		t.Fatal("expected cursor on partial failure")
 	}
-	if got := nextIncrementalCursor(nil, partial, now); got != nil {
-		t.Fatalf("first partial sync should keep a nil cursor, got %#v", got)
+	if !got.LastSyncTime.Equal(previous.LastSyncTime) {
+		t.Fatalf("partial failure advanced LastSyncTime: got %v want %v", got.LastSyncTime, previous.LastSyncTime)
 	}
-	if got := nextIncrementalCursor(previous, nil, now); got == nil || !got.LastSyncTime.Equal(now) {
+	prevCursor := parseCanvasCursor(got)
+	if prevCursor == nil || prevCursor.ResourceFiles["folder:10"]["file:1"] == "" {
+		t.Fatalf("partial failure should still refresh file inventory: %#v", got.ConnectorCursor)
+	}
+
+	if got := nextIncrementalCursor(nil, nil, nil, nil, partial, now); got == nil || !got.LastSyncTime.IsZero() {
+		t.Fatalf("first partial sync should keep zero LastSyncTime, got %#v", got)
+	}
+
+	got = nextIncrementalCursor(previous, nil, current, nil, nil, now)
+	if got == nil || !got.LastSyncTime.Equal(now) {
 		t.Fatalf("successful sync did not advance cursor: %#v", got)
+	}
+
+	hard := fmt.Errorf("%w: boom", datasource.ErrFetchFailed)
+	if got := nextIncrementalCursor(previous, nil, current, nil, hard, now); got != previous {
+		t.Fatalf("hard failure should keep previous cursor pointer, got %#v", got)
+	}
+}
+
+func TestDetectCanvasDeletions(t *testing.T) {
+	prev := &canvasCursor{
+		ResourceFiles: map[string]map[string]string{
+			"folder:10": {"file:1": "t1", "file:2": "t2"},
+			"folder:20": {"file:3": "t3"},
+		},
+	}
+	current := map[string]map[string]string{
+		"folder:10": {"file:1": "t1"},
+	}
+	items := detectCanvasDeletions(prev, current, nil)
+	if len(items) != 1 || !items[0].IsDeleted || items[0].ExternalID != "file:2" {
+		t.Fatalf("items=%v want only file:2 deleted", items)
+	}
+
+	// Deselected folder:20 must not emit deletions.
+	for _, it := range items {
+		if it.ExternalID == "file:3" {
+			t.Fatal("deselected resource must not emit IsDeleted")
+		}
+	}
+
+	incomplete := map[string]struct{}{"folder:10": {}}
+	if got := detectCanvasDeletions(prev, current, incomplete); len(got) != 0 {
+		t.Fatalf("incomplete listing must not emit deletions, got %v", got)
 	}
 }
 
@@ -199,6 +246,7 @@ func TestWalkFolderAncestorsSkipsInvisibleRootAndAddsCourse(t *testing.T) {
 type fakeCanvas struct {
 	server         *httptest.Server
 	files          map[int64]canvasFile
+	folderID       int64
 	getFileHits    atomic.Int64
 	downloadHits   atomic.Int64
 	downloadByFile map[int64]*atomic.Int64
@@ -208,6 +256,7 @@ func newFakeCanvas(t *testing.T, folderID int64, files []canvasFile) *fakeCanvas
 	t.Helper()
 	f := &fakeCanvas{
 		files:          map[int64]canvasFile{},
+		folderID:       folderID,
 		downloadByFile: map[int64]*atomic.Int64{},
 	}
 	for _, file := range files {
@@ -218,9 +267,12 @@ func newFakeCanvas(t *testing.T, folderID int64, files []canvasFile) *fakeCanvas
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api/v1/folders/%d/files", folderID), func(w http.ResponseWriter, r *http.Request) {
-		listed := make([]canvasFile, 0, len(files))
-		for _, file := range files {
+		listed := make([]canvasFile, 0, len(f.files))
+		for _, file := range f.files {
 			cp := file
+			if cp.FolderID != 0 && cp.FolderID != folderID {
+				continue
+			}
 			if cp.URL == "" {
 				cp.URL = f.server.URL + "/download/" + strconv.FormatInt(cp.ID, 10)
 			}
@@ -272,6 +324,10 @@ func newFakeCanvas(t *testing.T, folderID int64, files []canvasFile) *fakeCanvas
 		f.files[id] = meta
 	}
 	return f
+}
+
+func (f *fakeCanvas) removeFile(id int64) {
+	delete(f.files, id)
 }
 
 func (f *fakeCanvas) config(resourceIDs []string) *types.DataSourceConfig {
@@ -377,6 +433,108 @@ func TestFetchIncremental_DirectFileUsesSingleGetFile(t *testing.T) {
 	}
 	if got := f.downloadHits.Load(); got != 0 {
 		t.Fatalf("unchanged direct file must not download, got %d", got)
+	}
+}
+
+func TestFetchIncremental_DetectsDeletion(t *testing.T) {
+	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := newFakeCanvas(t, 10, []canvasFile{
+		{ID: 1, DisplayName: "keep.pdf", ContentType: "application/pdf", UpdatedAt: old.Format(time.RFC3339), FolderID: 10},
+		{ID: 2, DisplayName: "gone.pdf", ContentType: "application/pdf", UpdatedAt: old.Format(time.RFC3339), FolderID: 10},
+	})
+	cfg := f.config([]string{"folder:10"})
+
+	_, cursor, err := NewConnector().FetchIncremental(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	parsed := parseCanvasCursor(cursor)
+	if parsed == nil || len(parsed.ResourceFiles["folder:10"]) != 2 {
+		t.Fatalf("cursor inventory=%#v want 2 files", cursor.ConnectorCursor)
+	}
+
+	f.removeFile(2)
+	items, next, err := NewConnector().FetchIncremental(context.Background(), cfg, cursor)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	var deleted []types.FetchedItem
+	for _, it := range items {
+		if it.IsDeleted {
+			deleted = append(deleted, it)
+		}
+	}
+	if len(deleted) != 1 || deleted[0].ExternalID != "file:2" {
+		t.Fatalf("deleted=%v want file:2", deleted)
+	}
+	if deleted[0].SourceResourceID != "folder:10" {
+		t.Fatalf("SourceResourceID=%q", deleted[0].SourceResourceID)
+	}
+
+	nextParsed := parseCanvasCursor(next)
+	if nextParsed == nil || len(nextParsed.ResourceFiles["folder:10"]) != 1 {
+		t.Fatalf("next inventory=%#v want only file:1", next.ConnectorCursor)
+	}
+	if _, ok := nextParsed.ResourceFiles["folder:10"]["file:2"]; ok {
+		t.Fatal("deleted file still in cursor inventory")
+	}
+}
+
+func TestFetchIncremental_DeselectedResourceNotDeleted(t *testing.T) {
+	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := newFakeCanvas(t, 10, []canvasFile{
+		{ID: 1, DisplayName: "a.pdf", ContentType: "application/pdf", UpdatedAt: old.Format(time.RFC3339), FolderID: 10},
+	})
+	cfg := f.config([]string{"folder:10"})
+	_, cursor, err := NewConnector().FetchIncremental(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// User deselected folder:10; sync with empty selection should not emit IsDeleted.
+	cfg.ResourceIDs = nil
+	items, next, err := NewConnector().FetchIncremental(context.Background(), cfg, cursor)
+	if err != nil {
+		t.Fatalf("deselected sync: %v", err)
+	}
+	for _, it := range items {
+		if it.IsDeleted {
+			t.Fatalf("deselected resource must not emit IsDeleted, got %#v", it)
+		}
+	}
+	if parsed := parseCanvasCursor(next); parsed != nil && len(parsed.ResourceFiles) != 0 {
+		t.Fatalf("deselected resource should drop from cursor, got %#v", next.ConnectorCursor)
+	}
+}
+
+func TestFetchIncremental_DirectFileDeletion(t *testing.T) {
+	updated := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	f := newFakeCanvas(t, 10, []canvasFile{
+		{ID: 99, DisplayName: "solo.pdf", ContentType: "application/pdf", UpdatedAt: updated.Format(time.RFC3339), FolderID: 10},
+	})
+	cfg := f.config([]string{"file:99"})
+	_, cursor, err := NewConnector().FetchIncremental(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	f.removeFile(99)
+	items, next, err := NewConnector().FetchIncremental(context.Background(), cfg, cursor)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	var deleted int
+	for _, it := range items {
+		if it.IsDeleted && it.ExternalID == "file:99" {
+			deleted++
+		}
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted count=%d want 1; items=%v", deleted, items)
+	}
+	if parsed := parseCanvasCursor(next); parsed == nil || len(parsed.ResourceFiles["file:99"]) != 0 {
+		t.Fatalf("cursor should clear deleted direct file, got %#v", next.ConnectorCursor)
 	}
 }
 

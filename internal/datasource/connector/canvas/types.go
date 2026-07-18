@@ -170,3 +170,10 @@ func parseResourceID(externalID string) (kind string, id int64, err error) {
 	}
 	return
 }
+
+// canvasCursor stores incremental sync state for deletion detection.
+// Key1: selected resource ID (course:/folder:/file:), Key2: file external ID (file:N),
+// Value: updated_at (RFC3339). Deselected resources are dropped without emitting IsDeleted.
+type canvasCursor struct {
+	ResourceFiles map[string]map[string]string `json:"resource_files,omitempty"`
+}

@@ -2,6 +2,7 @@ package canvas
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -247,12 +248,15 @@ type collectedFile struct {
 func (c *Connector) FetchAll(
 	ctx context.Context, config *types.DataSourceConfig, resourceIDs []string,
 ) ([]types.FetchedItem, error) {
-	return c.fetch(ctx, config, resourceIDs, time.Time{})
+	items, _, _, err := c.fetch(ctx, config, resourceIDs, time.Time{})
+	return items, err
 }
 
 // FetchIncremental downloads only files updated since the last sync cursor.
 // Listing still walks the selected tree (Canvas has no folder-scoped "since" API),
 // but downloads are skipped when ListFiles/GetFile updated_at is not after the cursor.
+// Files present in the prior cursor but absent from the current listing are emitted
+// as IsDeleted=true (deselected resources are not treated as deletions).
 func (c *Connector) FetchIncremental(
 	ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor,
 ) ([]types.FetchedItem, *types.SyncCursor, error) {
@@ -260,57 +264,144 @@ func (c *Connector) FetchIncremental(
 	if cursor != nil {
 		since = cursor.LastSyncTime
 	}
-	items, err := c.fetch(ctx, config, config.ResourceIDs, since)
+	prev := parseCanvasCursor(cursor)
+
+	items, filesBySource, incomplete, err := c.fetch(ctx, config, config.ResourceIDs, since)
 	if err != nil {
 		var partial *datasource.PartialFetchError
 		if !errors.As(err, &partial) {
 			return nil, cursor, err
 		}
 	}
-	next := nextIncrementalCursor(cursor, err, time.Now().UTC())
+
+	if err == nil || isPartialFetch(err) {
+		items = append(items, detectCanvasDeletions(prev, filesBySource, incomplete)...)
+	}
+
+	next := nextIncrementalCursor(cursor, prev, filesBySource, incomplete, err, time.Now().UTC())
 	if err != nil {
 		return items, next, err
 	}
 	return items, next, nil
 }
 
+func isPartialFetch(err error) bool {
+	var partial *datasource.PartialFetchError
+	return errors.As(err, &partial)
+}
+
+func parseCanvasCursor(cursor *types.SyncCursor) *canvasCursor {
+	if cursor == nil || cursor.ConnectorCursor == nil {
+		return nil
+	}
+	var prev canvasCursor
+	b, err := json.Marshal(cursor.ConnectorCursor)
+	if err != nil {
+		return nil
+	}
+	if err := json.Unmarshal(b, &prev); err != nil {
+		return nil
+	}
+	return &prev
+}
+
+// detectCanvasDeletions emits IsDeleted for files that previously belonged to a
+// still-selected resource whose listing completed, but are missing from the
+// current inventory. Deselected resources and incomplete listings are skipped.
+func detectCanvasDeletions(
+	prev *canvasCursor,
+	current map[string]map[string]string,
+	incomplete map[string]struct{},
+) []types.FetchedItem {
+	if prev == nil || len(prev.ResourceFiles) == 0 {
+		return nil
+	}
+	var out []types.FetchedItem
+	for src, prevFiles := range prev.ResourceFiles {
+		if _, bad := incomplete[src]; bad {
+			continue
+		}
+		currFiles, stillSelected := current[src]
+		if !stillSelected {
+			continue
+		}
+		for fileID := range prevFiles {
+			if _, ok := currFiles[fileID]; ok {
+				continue
+			}
+			out = append(out, types.FetchedItem{
+				ExternalID:       fileID,
+				IsDeleted:        true,
+				SourceResourceID: src,
+				Metadata: map[string]string{
+					"channel": types.ChannelCanvas,
+				},
+			})
+		}
+	}
+	return out
+}
+
 func (c *Connector) fetch(
 	ctx context.Context, config *types.DataSourceConfig, resourceIDs []string, since time.Time,
-) ([]types.FetchedItem, error) {
+) ([]types.FetchedItem, map[string]map[string]string, map[string]struct{}, error) {
 	cli, _, err := clientFromConfig(config)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if len(resourceIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
 	files := map[int64]collectedFile{}
+	filesBySource := make(map[string]map[string]string)
+	incomplete := make(map[string]struct{})
 	var warnings []string
+
+	ensureSource := func(src string) {
+		if _, ok := filesBySource[src]; !ok {
+			filesBySource[src] = make(map[string]string)
+		}
+	}
 
 	for _, rid := range resourceIDs {
 		kind, id, err := parseResourceID(rid)
 		if err != nil {
 			warnings = append(warnings, err.Error())
+			incomplete[rid] = struct{}{}
 			continue
 		}
+		ensureSource(rid)
 		switch kind {
 		case resourceTypeFile:
 			files[id] = collectedFile{ID: id, Source: rid}
 		case resourceTypeFolder:
 			if err := c.collectFilesUnderFolder(ctx, cli, id, rid, files); err != nil {
 				warnings = append(warnings, err.Error())
+				incomplete[rid] = struct{}{}
 			}
 		case resourceTypeCourse:
 			root, err := cli.GetCourseRootFolder(ctx, id)
 			if err != nil {
 				warnings = append(warnings, err.Error())
+				incomplete[rid] = struct{}{}
 				continue
 			}
 			if err := c.collectFilesUnderFolder(ctx, cli, root.ID, rid, files); err != nil {
 				warnings = append(warnings, err.Error())
+				incomplete[rid] = struct{}{}
 			}
 		}
+	}
+
+	// Record listed files into the inventory before download filtering so
+	// unchanged files still count as "present" for deletion detection.
+	for _, cf := range files {
+		if cf.Meta == nil {
+			continue
+		}
+		ensureSource(cf.Source)
+		filesBySource[cf.Source][encodeFileID(cf.ID)] = cf.Meta.UpdatedAt
 	}
 
 	items := make([]types.FetchedItem, 0, len(files))
@@ -319,10 +410,17 @@ func (c *Connector) fetch(
 		if meta == nil || meta.URL == "" {
 			resolved, getErr := cli.GetFile(ctx, cf.ID)
 			if getErr != nil {
+				if errors.Is(getErr, datasource.ErrResourceNotFound) {
+					// Directly selected file deleted at source — omit from inventory.
+					continue
+				}
 				warnings = append(warnings, fmt.Sprintf("file %d: %v", cf.ID, getErr))
+				incomplete[cf.Source] = struct{}{}
 				continue
 			}
 			meta = resolved
+			ensureSource(cf.Source)
+			filesBySource[cf.Source][encodeFileID(cf.ID)] = meta.UpdatedAt
 		}
 		updatedAt, _ := time.Parse(time.RFC3339, meta.UpdatedAt)
 		if !since.IsZero() && !updatedAt.IsZero() && !updatedAt.After(since) {
@@ -349,12 +447,12 @@ func (c *Connector) fetch(
 	}
 
 	if len(warnings) > 0 && len(items) == 0 {
-		return nil, fmt.Errorf("%w: %s", datasource.ErrFetchFailed, strings.Join(warnings, "; "))
+		return nil, filesBySource, incomplete, fmt.Errorf("%w: %s", datasource.ErrFetchFailed, strings.Join(warnings, "; "))
 	}
 	if len(warnings) > 0 {
-		return items, &datasource.PartialFetchError{Details: warnings}
+		return items, filesBySource, incomplete, &datasource.PartialFetchError{Details: warnings}
 	}
-	return items, nil
+	return items, filesBySource, incomplete, nil
 }
 
 func (c *Connector) collectFilesUnderFolder(
@@ -380,13 +478,76 @@ func (c *Connector) collectFilesUnderFolder(
 	return nil
 }
 
-func nextIncrementalCursor(cursor *types.SyncCursor, fetchErr error, now time.Time) *types.SyncCursor {
-	if fetchErr != nil {
-		// Keep the previous high-water mark so files omitted by a transient
-		// partial failure remain eligible for the next incremental run.
-		return cursor
+func nextIncrementalCursor(
+	prevSync *types.SyncCursor,
+	prev *canvasCursor,
+	filesBySource map[string]map[string]string,
+	incomplete map[string]struct{},
+	fetchErr error,
+	now time.Time,
+) *types.SyncCursor {
+	if fetchErr != nil && !isPartialFetch(fetchErr) {
+		// Hard failure: keep the previous cursor entirely.
+		return prevSync
 	}
-	return &types.SyncCursor{LastSyncTime: now}
+
+	// Keep LastSyncTime on partial download failures so omitted files remain
+	// eligible for the next incremental run; still refresh the file inventory
+	// so deletion detection can advance for successfully listed resources.
+	lastSync := time.Time{}
+	if prevSync != nil {
+		lastSync = prevSync.LastSyncTime
+	}
+	if fetchErr == nil {
+		lastSync = now
+	}
+
+	merged := mergeCanvasResourceFiles(prev, filesBySource, incomplete)
+	cursorMap := make(map[string]interface{})
+	b, err := json.Marshal(&canvasCursor{ResourceFiles: merged})
+	if err == nil {
+		_ = json.Unmarshal(b, &cursorMap)
+	}
+	return &types.SyncCursor{
+		LastSyncTime:    lastSync,
+		ConnectorCursor: cursorMap,
+	}
+}
+
+// mergeCanvasResourceFiles builds the next inventory: complete current listings
+// win; incomplete sources keep their previous entries; deselected sources drop.
+func mergeCanvasResourceFiles(
+	prev *canvasCursor,
+	current map[string]map[string]string,
+	incomplete map[string]struct{},
+) map[string]map[string]string {
+	out := make(map[string]map[string]string)
+	for src, files := range current {
+		if _, bad := incomplete[src]; bad {
+			continue
+		}
+		cp := make(map[string]string, len(files))
+		for k, v := range files {
+			cp[k] = v
+		}
+		out[src] = cp
+	}
+	if prev != nil {
+		for src, files := range prev.ResourceFiles {
+			if _, bad := incomplete[src]; !bad {
+				continue
+			}
+			if _, already := out[src]; already {
+				continue
+			}
+			cp := make(map[string]string, len(files))
+			for k, v := range files {
+				cp[k] = v
+			}
+			out[src] = cp
+		}
+	}
+	return out
 }
 
 func sanitizeFileName(name string) string {
