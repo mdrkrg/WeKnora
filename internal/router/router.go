@@ -553,6 +553,13 @@ func RegisterChatRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbacGua
 	{
 		knowledgeSearch.POST("", handler.SearchKnowledge)
 	}
+
+	// Stateless chat endpoints (no session, no persistence)
+	knowledgeChatStateless := g.apiKeyGroup(r.Group("/knowledge-chat-stateless", g.Viewer()), apiKeyChat(apiKeyFullAccess()))
+	{
+		knowledgeChatStateless.POST("", handler.KnowledgeQAStateless)
+		knowledgeChatStateless.POST("/stop", handler.StopStatelessQA)
+	}
 }
 
 // RegisterTenantRoutes 注册租户相关的路由
