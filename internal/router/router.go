@@ -555,7 +555,9 @@ func RegisterChatRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbacGua
 	}
 
 	// Stateless chat endpoints (no session, no persistence)
-	knowledgeChatStateless := g.apiKeyGroup(r.Group("/knowledge-chat-stateless", g.Viewer()), apiKeyChat(apiKeyFullAccess()))
+	statelessGroup := r.Group("/knowledge-chat-stateless", g.Viewer())
+	statelessGroup.Use(middleware.StatelessRateLimit())
+	knowledgeChatStateless := g.apiKeyGroup(statelessGroup, apiKeyChat(apiKeyFullAccess()))
 	{
 		knowledgeChatStateless.POST("", handler.KnowledgeQAStateless)
 		knowledgeChatStateless.POST("/stop", handler.StopStatelessQA)

@@ -394,8 +394,8 @@ func newStatelessQATestEngine(
 		c.Next()
 	}
 
-	r.POST("/knowledge-chat-stateless", authMW, h.KnowledgeQAStateless)
-	r.POST("/knowledge-chat-stateless/stop", authMW, h.StopStatelessQA)
+	r.POST("/knowledge-chat-stateless", authMW, middleware.StatelessRateLimit(), h.KnowledgeQAStateless)
+	r.POST("/knowledge-chat-stateless/stop", authMW, middleware.StatelessRateLimit(), h.StopStatelessQA)
 
 	return r
 }
