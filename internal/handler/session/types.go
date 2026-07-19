@@ -92,3 +92,34 @@ type SearchKnowledgeRequest struct {
 type StopSessionRequest struct {
 	MessageID string `json:"message_id" binding:"required"`
 }
+
+// HistoryMessage represents a single message in the conversation history
+// for stateless chat requests. Only user and assistant roles are permitted;
+// system instructions are injected via CreateKnowledgeQAStatelessRequest.SystemPrompt.
+type HistoryMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// CreateKnowledgeQAStatelessRequest defines the request structure for the
+// stateless knowledge QA endpoint (POST /api/v1/knowledge-chat-stateless).
+// Unlike the stateful endpoint, this does not require a pre-created session
+// and does not persist any data server-side.
+type CreateKnowledgeQAStatelessRequest struct {
+	Query             string             `json:"query"               binding:"required"`
+	KnowledgeBaseIDs  []string           `json:"knowledge_base_ids"`
+	KnowledgeIDs      []string           `json:"knowledge_ids"`
+	SummaryModelID    string             `json:"summary_model_id"`
+	WebSearchEnabled  bool               `json:"web_search_enabled"`
+	History           []HistoryMessage   `json:"history"`
+	Images            []ImageAttachment  `json:"images"`
+	AttachmentUploads []AttachmentUpload `json:"attachment_uploads"`
+	SystemPrompt      string             `json:"system_prompt"`
+	TagIDs            []string           `json:"tag_ids"`
+}
+
+// StopStatelessQARequest represents the request body for the stateless stop endpoint.
+// Uses request_id from the agent_query SSE event, not session_id/message_id.
+type StopStatelessQARequest struct {
+	RequestID string `json:"request_id" binding:"required"`
+}
