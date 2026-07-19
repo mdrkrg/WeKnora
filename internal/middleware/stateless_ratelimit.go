@@ -1,3 +1,5 @@
+// Package middleware Rate limit middleware for the stateless chat endpoint.
+// Reference: docs/stateless-chat-spec.md, section 5.1 / section 9 constraint 8
 package middleware
 
 import (

@@ -1,3 +1,5 @@
+// Package session Stateless chat endpoint implementation.
+// Reference: docs/stateless-chat-spec.md
 package session
 
 import (

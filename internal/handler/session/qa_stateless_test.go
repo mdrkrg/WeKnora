@@ -1,3 +1,5 @@
+// Tests for the stateless chat endpoint.
+// Reference: docs/stateless-chat-spec.md
 package session
 
 import (

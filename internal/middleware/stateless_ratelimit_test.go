@@ -1,3 +1,5 @@
+// Tests for the stateless chat rate limit middleware.
+// Reference: docs/stateless-chat-spec.md, section 5.1
 package middleware
 
 import (
