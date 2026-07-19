@@ -542,8 +542,9 @@ func (h *AgentStreamHandler) handleError(ctx context.Context, evt event.Event) e
 
 	// Build error metadata
 	metadata := map[string]interface{}{
-		"stage": data.Stage,
-		"error": data.Error,
+		"stage":      data.Stage,
+		"error":      data.Error,
+		"error_code": data.ErrorCode,
 	}
 
 	// Append error event to stream

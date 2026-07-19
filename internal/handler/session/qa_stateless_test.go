@@ -775,6 +775,8 @@ func TestStatelessQA_PureChat_SSEEventSequence(t *testing.T) {
 			var data map[string]interface{}
 			require.NoError(t, json.Unmarshal([]byte(e.Data), &data))
 			assert.True(t, data["done"].(bool), "final_answer.done must be true (spec section 4)")
+			assert.Contains(t, data, "references",
+				"final_answer must contain references key even when empty (spec section 4)")
 		}
 	}
 }
@@ -835,6 +837,17 @@ func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 	assert.Contains(t, eventTypes, "answer", "RAG flow must have answer (spec section 3.1)")
 	assert.Contains(t, eventTypes, "final_answer", "RAG flow must have final_answer (spec section 3.1)")
 	assert.Contains(t, eventTypes, "complete", "RAG flow must have complete (spec section 3.1)")
+
+	// Verify final_answer contains references (spec section 3.1)
+	for _, e := range events {
+		if e.Event == "final_answer" {
+			var data map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(e.Data), &data))
+			assert.True(t, data["done"].(bool), "final_answer.done must be true")
+			assert.Contains(t, data, "references",
+				"final_answer must contain references key (spec section 3.1)")
+		}
+	}
 }
 
 // =============================================================================
@@ -938,6 +951,39 @@ func TestStatelessQA_DefaultModel_WhenNotSpecified(t *testing.T) {
 }
 
 // =============================================================================
+// Spec section 2.2 — web_search_enabled passed through to QA pipeline
+// =============================================================================
+
+func TestStatelessQA_WebSearchEnabled_PassedThrough(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	var capturedWebSearch bool
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		capturedWebSearch = req.WebSearchEnabled
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "search test",
+		WebSearchEnabled: true,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, capturedWebSearch,
+		"web_search_enabled should be passed through to QA pipeline (spec section 2.2)")
+}
+
+// =============================================================================
 // Spec section 2.2 - system_prompt passed to QA pipeline
 // =============================================================================
 
@@ -1025,9 +1071,13 @@ func TestStatelessQA_ToolResult_ContainsExpectedFields(t *testing.T) {
 
 	assert.NotEmpty(t, toolResultData["tool_call_id"], "tool_result must have tool_call_id")
 	assert.NotEmpty(t, toolResultData["tool_name"], "tool_result must have tool_name")
+	assert.Contains(t, toolResultData, "references",
+		"tool_result must contain references array (spec section 3.1)")
 
 	if output, ok := toolResultData["output"].(map[string]interface{}); ok {
 		assert.NotZero(t, output["total_duration_ms"], "output.total_duration_ms must be present (spec section 3.1)")
+		assert.Contains(t, output, "chunks_found",
+			"output.chunks_found must be present per spec section 3.2 (equals references.length)")
 	}
 }
 
@@ -1287,6 +1337,18 @@ func TestStatelessQA_ServiceError_EmitsSSEErrorEvent(t *testing.T) {
 	eventTypes := sseEventTypes(events)
 	assert.Contains(t, eventTypes, "error",
 		"SSE stream must contain error event when service fails (spec section 5.2)")
+
+	// Verify error event data structure (spec section 5.2)
+	for _, e := range events {
+		if e.Event == "error" {
+			var data map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(e.Data), &data))
+			assert.Contains(t, data, "code", "error event must contain code (spec section 5.2)")
+			assert.Contains(t, data, "message", "error event must contain message (spec section 5.2)")
+			assert.NotEmpty(t, data["request_id"],
+				"error event must contain request_id (spec section 5.2)")
+		}
+	}
 }
 
 // =============================================================================

@@ -300,8 +300,9 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 				eventBus.Emit(asyncCtx, event.Event{
 					Type: event.EventError,
 					Data: event.ErrorData{
-						Error: err.Error(),
-						Stage: "knowledge_qa_execution",
+						Error:     err.Error(),
+						ErrorCode: "SEARCH_FAILED",
+						Stage:     "knowledge_qa_execution",
 					},
 				})
 			}
@@ -576,6 +577,9 @@ func convertAndWriteStatelessSSE(
 			} else {
 				data["message"] = evt.Content
 			}
+		}
+		if codeVal, ok := data["code"]; !ok || codeVal == "" || codeVal == nil {
+			data["code"] = "UNKNOWN"
 		}
 		writeSSEEvent(c, "error", data)
 		return true
