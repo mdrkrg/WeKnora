@@ -1170,7 +1170,22 @@ func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 	blocker := make(chan struct{})
 	qaDone := make(chan struct{})
 
+	// Capture request_id via the stream manager so we can stop the right stream
+	// without reading HTTP body concurrently (avoids data race on httptest.ResponseRecorder).
+	requestIDCh := make(chan string, 1)
+
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		events, _, _ := streamMgr.GetEvents(ctx, req.Session.ID, req.AssistantMessageID, 0)
+		for _, e := range events {
+			if e.Type == "agent_query" && e.Data != nil {
+				if rid, ok := e.Data["request_id"].(string); ok && rid != "" {
+					select {
+					case requestIDCh <- rid:
+					default:
+					}
+				}
+			}
+		}
 		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentToolCall,
 			Data: event.AgentToolCallData{ToolCallID: "tc-1", ToolName: "knowledge_search"},
@@ -1196,32 +1211,15 @@ func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 		close(handlerDone)
 	}()
 
-	// Give the handler time to write agent_query and register the request_id
-	time.Sleep(200 * time.Millisecond)
-
-	// Extract request_id from the agent_query event in the SSE body.
-	// httptest.ResponseRecorder is not goroutine-safe, so we copy the body
-	// into a local buffer protected by a short window where the handler's
-	// ticker-based polling loop is in its 100ms sleep phase.
-	body := rec.Body.String()
-	events := parseSSEStream(t, body)
+	// Receive request_id via channel (avoids concurrent read on httptest.ResponseRecorder)
 	var requestID string
-	for _, e := range events {
-		if e.Event == "agent_query" {
-			var data map[string]interface{}
-			if json.Unmarshal([]byte(e.Data), &data) == nil {
-				if rid, ok := data["request_id"].(string); ok {
-					requestID = rid
-				}
-			}
-		}
-	}
-
-	if requestID == "" {
+	select {
+	case requestID = <-requestIDCh:
+	case <-time.After(2 * time.Second):
 		close(blocker)
 		<-qaDone
 		<-handlerDone
-		t.Skip("could not extract request_id from SSE stream")
+		t.Fatal("timed out waiting for request_id from QA goroutine")
 	}
 
 	// First stop during in-flight QA
@@ -1252,6 +1250,66 @@ func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 		"SSE stream must contain final_answer after stop (spec section 6.3)")
 	assert.Contains(t, finalTypes, "complete",
 		"SSE stream must contain complete after stop (spec section 6.3)")
+}
+
+// Spec section 5.2 - SSE error event when QA service returns an error
+// =============================================================================
+
+func TestStatelessQA_ServiceError_EmitsSSEErrorEvent(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
+			Type: event.EventError,
+			Data: event.ErrorData{
+				Error:     "vector store connection timeout",
+				ErrorCode: "SEARCH_FAILED",
+				Stage:     "knowledge_qa_execution",
+			},
+		})
+		return fmt.Errorf("search failed")
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "test error",
+		KnowledgeBaseIDs: []string{"kb-1"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	events := parseSSEStream(t, rec.Body.String())
+	eventTypes := sseEventTypes(events)
+	assert.Contains(t, eventTypes, "error",
+		"SSE stream must contain error event when service fails (spec section 5.2)")
+}
+
+// =============================================================================
+// Spec section 2.2/9 - attachment_uploads file size validation (max 5 MB)
+// =============================================================================
+
+func TestStatelessQA_AttachmentExceeds5MB_Returns400(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "test",
+		AttachmentUploads: []AttachmentUpload{
+			{Data: "base64...", FileName: "large.pdf", FileSize: 6 * 1024 * 1024},
+		},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"attachment > 5 MB should be rejected (spec section 2.2/9)")
 }
 
 // =============================================================================
