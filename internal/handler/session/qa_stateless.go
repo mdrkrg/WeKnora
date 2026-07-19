@@ -207,7 +207,7 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 
 	// Also write agent_query to StreamManager so stop watcher and test code
 	// can discover the request_id from the stream.
-	_ = h.streamManager.AppendEvent(ctx, sessionID, assistantMessageID, interfaces.StreamEvent{
+	if err := h.streamManager.AppendEvent(ctx, sessionID, assistantMessageID, interfaces.StreamEvent{
 		ID:        fmt.Sprintf("query-%d", time.Now().UnixNano()),
 		Type:      types.ResponseTypeAgentQuery,
 		Content:   request.Query,
@@ -218,7 +218,12 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 			"session_id":           sessionID,
 			"assistant_message_id": assistantMessageID,
 		},
-	})
+	}); err != nil {
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+			"request_id": requestID,
+			"session_id": sessionID,
+		})
+	}
 
 	// Base context for async work
 	baseCtx := logger.CloneContext(ctx)
