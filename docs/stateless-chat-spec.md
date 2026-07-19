@@ -359,3 +359,85 @@ curl -X POST https://weknora/api/v1/knowledge-chat-stateless \
 7. **请求体限制**：最大 10 MB。`history` 最多 100 条消息（50 轮）。单个 `attachment_uploads` 文件最大 5 MB（原始大小，服务端在 base64 解码后按实际字节数校验，不以声明值 `file_size` 为准）
 8. **频率限制**：每个 Tenant 每分钟最多 60 次请求。超出返回 429
 9. **模型标识**：`summary_model_id` 同时接受 UUID 和模型名称。名称唯一性由 WeKnora 现有约束保证（Tenant 内模型 `name` 不可重复），不存在歧义
+
+> **关于 `complete` 事件的 `model_id`**：该字段返回的是**解析后的模型 UUID**（即经过 UUID 精确匹配或名称查找后确定的实际模型 ID），而非请求时传入的原始值。若请求传入的是模型名称，服务端会先将其解析为 UUID 再返回。
+
+## 10. 测试索引
+
+以下测试位于 `internal/handler/session/qa_stateless_test.go`（Handler 集成测试）和 `internal/middleware/stateless_ratelimit_test.go`（限流中间件测试）。
+
+### 请求验证 — spec sections 2.2, 9
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_EmptyQuery_Returns400` | query 为空 → 400 |
+| `TestStatelessQA_KnowledgeIDsWithoutKBIDs_Returns400` | knowledge_ids 单独提供 → 400 |
+| `TestStatelessQA_TagIDsWithoutKBIDs_Returns400` | tag_ids 单独提供（无 KB） → 400 |
+| `TestStatelessQA_HistoryExceeds100_Returns400` | history 超过 100 条 → 400 |
+| `TestStatelessQA_SystemRoleInHistory_Returns400` | history 含 role: "system" → 400 |
+| `TestStatelessQA_HistoryInvalidRole_Returns400` | history 含非法 role（admin/tool/function/空） → 400 |
+| `TestStatelessQA_ValidHistoryRoles_Succeed` | 合法 role（user/assistant） → 200 |
+| `TestStatelessQA_HistoryAt100_Succeeds` | history 恰好 100 条（边界值） → 200 |
+| `TestStatelessQA_AttachmentExceeds5MB_Returns400` | attachment_uploads 单文件 > 5 MB → 400 |
+
+### 认证与授权 — spec sections 2.2, 2.3, 5.1
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_Unauthenticated_Returns401` | 无认证 → 401 |
+| `TestStatelessQA_NonexistentModel_Returns403` | 引用不存在的模型 → 403 |
+| `TestStatelessQA_NonexistentKB_Returns403` | 引用不存在的 KB → 403 |
+| `TestStatelessQA_BodyExceeds10MB_Returns413` | 请求体 > 10 MB → 413 |
+
+### 模型解析 — spec section 2.2
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_ModelResolution_ByName` | 按名称查找模型 |
+| `TestStatelessQA_ModelResolution_ByUUID` | UUID 精确匹配优先 |
+| `TestStatelessQA_DefaultModel_WhenNotSpecified` | 未传 summary_model_id → 使用 Tenant 默认 |
+
+### 请求字段透传 — spec section 2.2
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_SystemPrompt_ReachesLLM` | system_prompt 到达 QA 管线 |
+| `TestStatelessQA_WebSearchEnabled_PassedThrough` | web_search_enabled 到达 QA 管线 |
+
+### SSE 事件序列 — spec sections 3.1, 4
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_PureChat_SSEEventSequence` | 纯对话模式事件流 + references 空数组验证 + tool_call/tool_result 不存在 |
+| `TestStatelessQA_RAG_SSEEventSequence` | 完整 RAG 事件流（agent_query → tool_call → tool_result → answer → final_answer → complete） |
+| `TestStatelessQA_AgentQueryEvent_HasRequestIDAndQuery` | agent_query 事件包含 request_id + query |
+| `TestStatelessQA_CompleteEvent_HasUsageAndTiming` | complete 事件包含 usage（prompt_tokens/completion_tokens/total_tokens）+ elapsed_ms + model_id |
+| `TestStatelessQA_ToolResult_ContainsExpectedFields` | tool_result 事件：tool_call_id, tool_name, output（chunks_found, total_duration_ms）, references |
+
+### 错误处理 — spec section 5.2
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_ServiceError_EmitsSSEErrorEvent` | SSE error 事件 + data 结构（code, message, request_id） |
+
+### 停止 — spec section 6
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_Stop_Returns200ForAnyRequestID` | 停止任意/不存在的 request_id → 200（幂等） |
+| `TestStatelessQA_Stop_DuringQA_ThenIdempotent` | 飞行中停止 + 重复停止 → 200x3 + SSE 包含 final_answer + complete |
+
+### 零副作用 — spec section 7
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessQA_NoDBWrites` | 不调用 CreateSession |
+
+### 限流 — spec section 5.1（`internal/middleware/stateless_ratelimit_test.go`）
+
+| 测试 | 覆盖 |
+|------|------|
+| `TestStatelessRateLimit_AllowsUpTo60` | 60 次请求 → 全部放行 |
+| `TestStatelessRateLimit_Rejects61stRequest` | 第 61 次 → 429 |
+| `TestStatelessRateLimit_RespectsPerTenant` | 不同 Tenant 独立配额 |
+| `TestStatelessRateLimit_NoTenant_SkipsLimiter` | 无 Tenant 上下文时跳过限流 |
