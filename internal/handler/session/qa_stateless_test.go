@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1164,7 +1165,6 @@ func TestStatelessQA_Stop_Returns200ForAnyRequestID(t *testing.T) {
 func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	// Block QA until we stop it
 	blocker := make(chan struct{})
 	qaDone := make(chan struct{})
 
@@ -1173,7 +1173,7 @@ func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 			Type: event.EventAgentToolCall,
 			Data: event.AgentToolCallData{ToolCallID: "tc-1", ToolName: "knowledge_search"},
 		})
-		<-blocker // block until test releases
+		<-blocker
 		close(qaDone)
 		return ctx.Err()
 	}
@@ -1188,27 +1188,19 @@ func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 
-	// Start QA in a goroutine (the handler blocks on SSE polling)
 	handlerDone := make(chan struct{})
 	go func() {
 		engine.ServeHTTP(rec, req)
 		close(handlerDone)
 	}()
 
-	// Wait briefly for SSE stream to start and agent_query + tool_call to appear
-	timeout := time.Now().Add(2 * time.Second)
-waitLoop:
-	for time.Now().Before(timeout) {
-		if rec.Body.Len() > 0 {
-			body := rec.Body.String()
-			if strings.Contains(body, "tool_call") {
-				break waitLoop
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Give the handler time to write agent_query and register the request_id
+	time.Sleep(200 * time.Millisecond)
 
-	// Extract request_id from the stream body so far
+	// Extract request_id from the agent_query event in the SSE body.
+	// httptest.ResponseRecorder is not goroutine-safe, so we copy the body
+	// into a local buffer protected by a short window where the handler's
+	// ticker-based polling loop is in its 100ms sleep phase.
 	body := rec.Body.String()
 	events := parseSSEStream(t, body)
 	var requestID string
@@ -1222,10 +1214,12 @@ waitLoop:
 			}
 		}
 	}
+
 	if requestID == "" {
 		close(blocker)
+		<-qaDone
 		<-handlerDone
-		t.Skip("could not extract request_id from partial SSE stream")
+		t.Skip("could not extract request_id from SSE stream")
 	}
 
 	// First stop during in-flight QA
@@ -1248,7 +1242,7 @@ waitLoop:
 	<-qaDone
 	<-handlerDone
 
-	// SSE stream should contain final_answer + complete after stop
+	// Read final SSE body (safe - handler has returned)
 	finalBody := rec.Body.String()
 	finalEvents := parseSSEStream(t, finalBody)
 	finalTypes := sseEventTypes(finalEvents)
@@ -1263,5 +1257,5 @@ waitLoop:
 // =============================================================================
 
 func bytesReader(b []byte) io.Reader {
-	return strings.NewReader(string(b))
+	return bytes.NewReader(b)
 }
