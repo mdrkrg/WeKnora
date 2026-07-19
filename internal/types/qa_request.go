@@ -20,5 +20,6 @@ type QARequest struct {
 	WebSearchEnabled   bool               // Whether web search is enabled for this request
 	EnableMemory       bool               // Whether memory feature is enabled
 	QuotedContext      string             // Quoted message content from IM quote-reply (appended at LLM prompt stage, not used for retrieval)
+	SystemPrompt       string             // User-supplied system prompt appended to the base system prompt (stateless chat spec section 2.2)
 	Attachments        MessageAttachments // File attachments (processed and ready for prompt injection)
 }

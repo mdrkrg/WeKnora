@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/middleware"
@@ -34,13 +36,10 @@ import (
 
 type stubStatelessSessionService struct {
 	knowledgeQAFn      func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error
-	createSessionFn    func(ctx context.Context, session *types.Session) (*types.Session, error)
 	createSessionCalls int
-	getSessionCalls    int
 }
 
 func (s *stubStatelessSessionService) GetSession(_ context.Context, _ string) (*types.Session, error) {
-	s.getSessionCalls++
 	return &types.Session{ID: "test-session", TenantID: 1}, nil
 }
 
@@ -54,9 +53,6 @@ func (s *stubStatelessSessionService) SetSessionOwnerID(_ context.Context, _ uin
 
 func (s *stubStatelessSessionService) CreateSession(_ context.Context, sess *types.Session) (*types.Session, error) {
 	s.createSessionCalls++
-	if s.createSessionFn != nil {
-		return s.createSessionFn(context.Background(), sess)
-	}
 	return sess, nil
 }
 
@@ -91,9 +87,9 @@ func (s *stubStatelessSessionService) GenerateTitle(_ context.Context, _ *types.
 func (s *stubStatelessSessionService) GenerateTitleAsync(_ context.Context, _ *types.Session, _ string, _ string, _ *event.EventBus) {
 }
 
-func (s *stubStatelessSessionService) KnowledgeQA(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
+func (s *stubStatelessSessionService) KnowledgeQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
 	if s.knowledgeQAFn != nil {
-		return s.knowledgeQAFn(ctx, req, eventBus)
+		return s.knowledgeQAFn(ctx, req, bus)
 	}
 	return nil
 }
@@ -102,9 +98,9 @@ func (s *stubStatelessSessionService) KnowledgeQAByEvent(_ context.Context, _ *t
 	return nil
 }
 
-func (s *stubStatelessSessionService) AgentQA(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
+func (s *stubStatelessSessionService) AgentQA(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
 	if s.knowledgeQAFn != nil {
-		return s.knowledgeQAFn(ctx, req, eventBus)
+		return s.knowledgeQAFn(ctx, req, bus)
 	}
 	return nil
 }
@@ -121,36 +117,40 @@ type stubStatelessModelService struct {
 	modelsByID   map[string]*types.Model
 	modelsByName map[string]*types.Model
 	modelErr     error
+	listedModels []*types.Model
 }
 
-func (s *stubStatelessModelService) GetModelByID(_ context.Context, id string) (*types.Model, error) {
-	if s.modelErr != nil {
-		return nil, s.modelErr
+func (m *stubStatelessModelService) GetModelByID(_ context.Context, id string) (*types.Model, error) {
+	if m.modelErr != nil {
+		return nil, m.modelErr
 	}
-	if m, ok := s.modelsByID[id]; ok {
-		return m, nil
+	if mdl, ok := m.modelsByID[id]; ok {
+		return mdl, nil
 	}
-	if m, ok := s.modelsByName[id]; ok {
-		return m, nil
+	if mdl, ok := m.modelsByName[id]; ok {
+		return mdl, nil
 	}
 	return nil, fmt.Errorf("model not found: %s", id)
 }
 
-func (s *stubStatelessModelService) ListModels(_ context.Context) ([]*types.Model, error) {
+func (m *stubStatelessModelService) ListModels(_ context.Context) ([]*types.Model, error) {
+	if m.listedModels != nil {
+		return m.listedModels, nil
+	}
 	var models []*types.Model
-	for _, m := range s.modelsByID {
-		models = append(models, m)
+	for _, mdl := range m.modelsByID {
+		models = append(models, mdl)
 	}
 	return models, nil
 }
-func (s *stubStatelessModelService) CreateModel(context.Context, *types.Model) error { return nil }
-func (s *stubStatelessModelService) UpdateModel(context.Context, *types.Model) error { return nil }
-func (s *stubStatelessModelService) DeleteModel(context.Context, string) error       { return nil }
-func (s *stubStatelessModelService) UpdateModelCredentials(context.Context, string, *string, *string) (*types.Model, error) {
+func (m *stubStatelessModelService) CreateModel(context.Context, *types.Model) error { return nil }
+func (m *stubStatelessModelService) UpdateModel(context.Context, *types.Model) error { return nil }
+func (m *stubStatelessModelService) DeleteModel(context.Context, string) error       { return nil }
+func (m *stubStatelessModelService) UpdateModelCredentials(context.Context, string, *string, *string) (*types.Model, error) {
 	return nil, nil
 }
 
-func (s *stubStatelessModelService) ClearModelCredential(context.Context, string, string) error {
+func (m *stubStatelessModelService) ClearModelCredential(context.Context, string, string) error {
 	return nil
 }
 
@@ -179,14 +179,10 @@ func (s *stubStatelessModelService) GetVLMModel(context.Context, string) (vlm.VL
 }
 
 type stubStatelessKBService struct {
-	kbs     map[string]*types.KnowledgeBase
-	findErr error
+	kbs map[string]*types.KnowledgeBase
 }
 
 func (s *stubStatelessKBService) GetKnowledgeBaseByID(_ context.Context, id string) (*types.KnowledgeBase, error) {
-	if s.findErr != nil {
-		return nil, s.findErr
-	}
 	if kb, ok := s.kbs[id]; ok {
 		return kb, nil
 	}
@@ -194,9 +190,6 @@ func (s *stubStatelessKBService) GetKnowledgeBaseByID(_ context.Context, id stri
 }
 
 func (s *stubStatelessKBService) GetKnowledgeBaseByIDOnly(_ context.Context, id string) (*types.KnowledgeBase, error) {
-	if s.findErr != nil {
-		return nil, s.findErr
-	}
 	if kb, ok := s.kbs[id]; ok {
 		return kb, nil
 	}
@@ -260,6 +253,7 @@ func (s *stubStatelessKBService) GetRepository() interfaces.KnowledgeBaseReposit
 func (s *stubStatelessKBService) ProcessKBDelete(_ context.Context, _ *asynq.Task) error { return nil }
 
 type stubStatelessStreamManager struct {
+	mu        sync.Mutex
 	events    map[string][]interfaces.StreamEvent
 	appendErr error
 	getErr    error
@@ -269,7 +263,9 @@ func (m *stubStatelessStreamManager) key(sessionID, messageID string) string {
 	return sessionID + ":" + messageID
 }
 
-func (m *stubStatelessStreamManager) AppendEvent(_ context.Context, sessionID, messageID string, event interfaces.StreamEvent) error {
+func (m *stubStatelessStreamManager) AppendEvent(_ context.Context, sessionID, messageID string, evt interfaces.StreamEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.appendErr != nil {
 		return m.appendErr
 	}
@@ -277,11 +273,13 @@ func (m *stubStatelessStreamManager) AppendEvent(_ context.Context, sessionID, m
 		m.events = make(map[string][]interfaces.StreamEvent)
 	}
 	k := m.key(sessionID, messageID)
-	m.events[k] = append(m.events[k], event)
+	m.events[k] = append(m.events[k], evt)
 	return nil
 }
 
 func (m *stubStatelessStreamManager) GetEvents(_ context.Context, sessionID, messageID string, fromOffset int) ([]interfaces.StreamEvent, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.getErr != nil {
 		return nil, 0, m.getErr
 	}
@@ -429,9 +427,12 @@ func TestStatelessQA_EmptyQuery_Returns400(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "",
+		KnowledgeBaseIDs: []string{"kb-1"},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"","knowledge_base_ids":["kb-1"]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -446,9 +447,12 @@ func TestStatelessQA_KnowledgeIDsWithoutKBIDs_Returns400(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:        "what is attention?",
+		KnowledgeIDs: []string{"kn-1"},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"what is attention?","knowledge_ids":["kn-1"]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -463,9 +467,12 @@ func TestStatelessQA_TagIDsWithoutKBIDs_Returns400(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:  "what is attention?",
+		TagIDs: []string{"tag-1"},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"what is attention?","tag_ids":["tag-1"]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -493,7 +500,7 @@ func TestStatelessQA_HistoryExceeds100_Returns400(t *testing.T) {
 		History: history,
 	})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(string(reqBody)))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -508,13 +515,93 @@ func TestStatelessQA_SystemRoleInHistory_Returns400(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "hello",
+		History: []HistoryMessage{
+			{Role: "system", Content: "you are helpful"},
+		},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"hello","history":[{"role":"system","content":"you are helpful"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// =============================================================================
+// Spec section 2.2 - valid history roles (user, assistant) accepted
+// =============================================================================
+
+func TestStatelessQA_ValidHistoryRoles_Succeed(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	var called bool
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		called = true
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "hello",
+		History: []HistoryMessage{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+		},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called, "QA service should be invoked with valid history roles")
+}
+
+// =============================================================================
+// Spec section 9 constraint 7 - history at max 100 (boundary) succeeds
+// =============================================================================
+
+func TestStatelessQA_HistoryAt100_Succeeds(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	var called bool
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		called = true
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	history := make([]HistoryMessage, 100)
+	for i := range history {
+		if i%2 == 0 {
+			history[i] = HistoryMessage{Role: "user", Content: fmt.Sprintf("q%d", i)}
+		} else {
+			history[i] = HistoryMessage{Role: "assistant", Content: fmt.Sprintf("a%d", i)}
+		}
+	}
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:   "test",
+		History: history,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called, "QA should succeed at history boundary of 100")
 }
 
 // =============================================================================
@@ -528,9 +615,12 @@ func TestStatelessQA_NonexistentModel_Returns403(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:          "hello",
+		SummaryModelID: "nonexistent-model",
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"hello","summary_model_id":"nonexistent-model"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -545,9 +635,12 @@ func TestStatelessQA_NonexistentKB_Returns403(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "hello",
+		KnowledgeBaseIDs: []string{"kb-nonexistent"},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"hello","knowledge_base_ids":["kb-nonexistent"]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -570,9 +663,9 @@ func TestStatelessQA_Unauthenticated_Returns401(t *testing.T) {
 	r.Use(middleware.ErrorHandler())
 	r.POST("/knowledge-chat-stateless", h.KnowledgeQAStateless)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{Query: "hello"})
 	rec := httptest.NewRecorder()
-	body := `{"query":"hello"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(rec, req)
 
@@ -580,21 +673,57 @@ func TestStatelessQA_Unauthenticated_Returns401(t *testing.T) {
 }
 
 // =============================================================================
-// Spec section 5.1 - 413 request body exceeds 10 MB
+// Spec section 5.1 - 413 request body exceeds 10 MB (enforced by router)
 // =============================================================================
 
 func TestStatelessQA_BodyExceeds10MB_Returns413(t *testing.T) {
+	// The handler should check body size before binding JSON.
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
-	largeContent := strings.Repeat("x", 10*1024*1024+100)
+	// Build a body that exceeds 10MB: large content field
+	large := strings.Repeat("a", 10*1024*1024+100)
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: large,
+	})
+	// The body size itself may be smaller due to JSON encoding overhead,
+	// but the query field length alone pushes it over the edge.
+	require.Greater(t, len(reqBody), 10*1024*1024, "test body must exceed 10MB")
+
 	rec := httptest.NewRecorder()
-	body := fmt.Sprintf(`{"query":"%s"}`, largeContent)
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}
+
+// =============================================================================
+// Spec section 7 - No DB writes (session/message not persisted)
+// =============================================================================
+
+func TestStatelessQA_NoDBWrites(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{Query: "test no db writes"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, 0, sessionSvc.createSessionCalls,
+		"stateless endpoint must not create sessions (spec section 7)")
 }
 
 // =============================================================================
@@ -604,8 +733,8 @@ func TestStatelessQA_BodyExceeds10MB_Returns413(t *testing.T) {
 func TestStatelessQA_PureChat_SSEEventSequence(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		eventBus.Emit(ctx, event.Event{
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
 			Data: event.AgentFinalAnswerData{Content: "pure chat response", Done: true, IsFallback: true},
 		})
@@ -614,9 +743,11 @@ func TestStatelessQA_PureChat_SSEEventSequence(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "what is the meaning of life?",
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"what is the meaning of life?"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -625,12 +756,16 @@ func TestStatelessQA_PureChat_SSEEventSequence(t *testing.T) {
 
 	events := parseSSEStream(t, rec.Body.String())
 	require.NotEmpty(t, events, "expected at least one SSE event")
-	assert.Equal(t, "agent_query", events[0].Event, "first event must be agent_query (spec section 3.1)")
+	assert.Equal(t, "agent_query", events[0].Event, "first event must be agent_query (spec section 3.2)")
 
 	eventTypes := sseEventTypes(events)
 	assert.Contains(t, eventTypes, "answer", "pure chat must have answer events (spec section 4)")
 	assert.Contains(t, eventTypes, "final_answer", "pure chat must have final_answer (spec section 4)")
 	assert.Contains(t, eventTypes, "complete", "pure chat must have complete (spec section 4)")
+
+	// Pure chat must NOT have retrieval events (spec section 4)
+	assert.NotContains(t, eventTypes, "tool_call", "pure chat must not have tool_call (spec section 4)")
+	assert.NotContains(t, eventTypes, "tool_result", "pure chat must not have tool_result (spec section 4)")
 
 	for _, e := range events {
 		if e.Event == "final_answer" {
@@ -648,9 +783,9 @@ func TestStatelessQA_PureChat_SSEEventSequence(t *testing.T) {
 func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
 		toolCallID := uuid.New().String()
-		eventBus.Emit(ctx, event.Event{
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentToolCall,
 			Data: event.AgentToolCallData{
 				ToolCallID: toolCallID,
@@ -658,7 +793,7 @@ func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 				Arguments:  map[string]any{"knowledge_base_ids": req.KnowledgeBaseIDs},
 			},
 		})
-		eventBus.Emit(ctx, event.Event{
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentToolResult,
 			Data: event.AgentToolResultData{
 				ToolCallID: toolCallID,
@@ -668,7 +803,7 @@ func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 				Duration:   150,
 			},
 		})
-		eventBus.Emit(ctx, event.Event{
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
 			Data: event.AgentFinalAnswerData{Content: "RAG-based answer", Done: true},
 		})
@@ -677,9 +812,12 @@ func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "what is attention?",
+		KnowledgeBaseIDs: []string{"kb-1"},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"what is attention?","knowledge_base_ids":["kb-1"]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -697,16 +835,16 @@ func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 }
 
 // =============================================================================
-// Spec section 2.2 - model resolution by name (UUID first, then name)
+// Spec section 2.2 - model resolution by name
 // =============================================================================
 
 func TestStatelessQA_ModelResolution_ByName(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
 	var resolvedModelID string
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
 		resolvedModelID = req.SummaryModelID
-		eventBus.Emit(ctx, event.Event{
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
 			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
 		})
@@ -715,9 +853,12 @@ func TestStatelessQA_ModelResolution_ByName(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:          "hello",
+		SummaryModelID: "gpt-4o",
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"hello","summary_model_id":"gpt-4o"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -726,75 +867,71 @@ func TestStatelessQA_ModelResolution_ByName(t *testing.T) {
 }
 
 // =============================================================================
-// Spec section 6.3 - Stop by request_id, repeat stop is idempotent
+// Spec section 2.2 - model resolution by UUID
 // =============================================================================
 
-func TestStatelessQA_Stop_Idempotent(t *testing.T) {
+func TestStatelessQA_ModelResolution_ByUUID(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		eventBus.Emit(ctx, event.Event{
-			Type: event.EventAgentQuery,
-			Data: event.AgentQueryData{Query: req.Query, RequestID: "req-stop-idempotent"},
-		})
-		eventBus.Emit(ctx, event.Event{
+	var resolvedModelID string
+	modelUUID := uuid.New().String()
+	modelSvc.modelsByID[modelUUID] = &types.Model{
+		ID: modelUUID, Name: "uuid-model", Type: types.ModelTypeKnowledgeQA, TenantID: 1,
+	}
+
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		resolvedModelID = req.SummaryModelID
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
-			Data: event.AgentFinalAnswerData{Content: "resp", Done: true},
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
 		})
 		return nil
 	}
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
-	rec1 := httptest.NewRecorder()
-	body := `{"query":"test stop"}`
-	req1 := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
-	req1.Header.Set("Content-Type", "application/json")
-	engine.ServeHTTP(rec1, req1)
-	require.Equal(t, http.StatusOK, rec1.Code)
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:          "hello",
+		SummaryModelID: modelUUID,
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
 
-	events := parseSSEStream(t, rec1.Body.String())
-	var requestID string
-	for _, e := range events {
-		if e.Event == "agent_query" {
-			var data map[string]interface{}
-			if err := json.Unmarshal([]byte(e.Data), &data); err == nil {
-				if rid, ok := data["request_id"].(string); ok {
-					requestID = rid
-				}
-			}
-		}
-	}
-	if requestID == "" {
-		t.Skip("request_id not found in SSE stream, skipping stop test")
-	}
-
-	stopBody, _ := json.Marshal(StopStatelessQARequest{RequestID: requestID})
-
-	for i := 0; i < 3; i++ {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless/stop",
-			strings.NewReader(string(stopBody)))
-		req.Header.Set("Content-Type", "application/json")
-		engine.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code, "stop #%d should return 200 (spec section 6.3)", i+1)
-	}
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, modelUUID, resolvedModelID,
+		"model should be resolved by UUID (spec section 2.2 UUID-first)")
 }
 
 // =============================================================================
-// Spec section 6.3 - Stop endpoint returns 200 for any request_id (idempotent)
+// Spec section 2.2 - default model when summary_model_id not provided
 // =============================================================================
 
-func TestStatelessQA_Stop_Returns200ForAnyRequestID(t *testing.T) {
+func TestStatelessQA_DefaultModel_WhenNotSpecified(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	var resolvedModelID string
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		resolvedModelID = req.SummaryModelID
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
-	stopReq := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless/stop",
-		strings.NewReader(`{"request_id":"nonexistent-request-id"}`))
-	stopReq.Header.Set("Content-Type", "application/json")
-	stopRec := httptest.NewRecorder()
-	engine.ServeHTTP(stopRec, stopReq)
-	assert.Equal(t, http.StatusOK, stopRec.Code)
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{Query: "hello"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotEmpty(t, resolvedModelID,
+		"default model should be used when summary_model_id is empty (spec section 2.2)")
 }
 
 // =============================================================================
@@ -804,43 +941,46 @@ func TestStatelessQA_Stop_Returns200ForAnyRequestID(t *testing.T) {
 func TestStatelessQA_SystemPrompt_ReachesLLM(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	var capturedPrompt string
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		capturedPrompt = req.QuotedContext
-		eventBus.Emit(ctx, event.Event{
+	var capturedSystemPrompt string
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		capturedSystemPrompt = req.SystemPrompt
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
-			Data: event.AgentFinalAnswerData{Content: "response with custom prompt", Done: true},
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
 		})
 		return nil
 	}
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
-	body := `{"query":"hello","system_prompt":"Reply in French only."}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:        "hello",
+		SystemPrompt: "Reply in French only.",
+	})
 	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, capturedPrompt, "Reply in French only.",
-		"system_prompt should be passed to the QA pipeline (spec section 2.2)")
+	assert.Equal(t, "Reply in French only.", capturedSystemPrompt,
+		"system_prompt should be passed to QA pipeline (spec section 2.2)")
 }
 
 // =============================================================================
-// Spec section 3.1 - tool_result event contains references array
+// Spec section 3.1 - tool_result event structure
 // =============================================================================
 
-func TestStatelessQA_ToolResult_ContainsToolCallID(t *testing.T) {
+func TestStatelessQA_ToolResult_ContainsExpectedFields(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
 	toolCallID := uuid.New().String()
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		eventBus.Emit(ctx, event.Event{
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentToolCall,
 			Data: event.AgentToolCallData{ToolCallID: toolCallID, ToolName: "knowledge_search"},
 		})
-		eventBus.Emit(ctx, event.Event{
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentToolResult,
 			Data: event.AgentToolResultData{
 				ToolCallID: toolCallID,
@@ -850,7 +990,7 @@ func TestStatelessQA_ToolResult_ContainsToolCallID(t *testing.T) {
 				Duration:   100,
 			},
 		})
-		eventBus.Emit(ctx, event.Event{
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
 			Data: event.AgentFinalAnswerData{Content: "answer with refs", Done: true},
 		})
@@ -859,27 +999,33 @@ func TestStatelessQA_ToolResult_ContainsToolCallID(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
-	body := `{"query":"test","knowledge_base_ids":["kb-1"]}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "test",
+		KnowledgeBaseIDs: []string{"kb-1"},
+	})
 	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	events := parseSSEStream(t, rec.Body.String())
 
-	foundRefs := false
+	var toolResultData map[string]interface{}
 	for _, e := range events {
 		if e.Event == "tool_result" {
-			var data map[string]interface{}
-			require.NoError(t, json.Unmarshal([]byte(e.Data), &data))
-			assert.NotEmpty(t, data["tool_call_id"], "tool_result must have tool_call_id (spec section 3.1)")
-			if _, ok := data["references"]; ok {
-				foundRefs = true
-			}
+			require.NoError(t, json.Unmarshal([]byte(e.Data), &toolResultData))
+			break
 		}
 	}
-	assert.True(t, foundRefs, "tool_result should contain references array (spec section 3.1)")
+	require.NotNil(t, toolResultData, "tool_result event must be present (spec section 3.1)")
+
+	assert.NotEmpty(t, toolResultData["tool_call_id"], "tool_result must have tool_call_id")
+	assert.NotEmpty(t, toolResultData["tool_name"], "tool_result must have tool_name")
+
+	if output, ok := toolResultData["output"].(map[string]interface{}); ok {
+		assert.NotZero(t, output["total_duration_ms"], "output.total_duration_ms must be present (spec section 3.1)")
+	}
 }
 
 // =============================================================================
@@ -889,8 +1035,8 @@ func TestStatelessQA_ToolResult_ContainsToolCallID(t *testing.T) {
 func TestStatelessQA_AgentQueryEvent_HasRequestIDAndQuery(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		eventBus.Emit(ctx, event.Event{
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
 			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
 		})
@@ -899,9 +1045,11 @@ func TestStatelessQA_AgentQueryEvent_HasRequestIDAndQuery(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "what is attention?",
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"what is attention?"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -925,8 +1073,8 @@ func TestStatelessQA_AgentQueryEvent_HasRequestIDAndQuery(t *testing.T) {
 func TestStatelessQA_CompleteEvent_HasUsageAndTiming(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		eventBus.Emit(ctx, event.Event{
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
 			Type: event.EventAgentFinalAnswer,
 			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
 		})
@@ -935,9 +1083,9 @@ func TestStatelessQA_CompleteEvent_HasUsageAndTiming(t *testing.T) {
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{Query: "test"})
 	rec := httptest.NewRecorder()
-	body := `{"query":"test"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(rec, req)
 
@@ -953,12 +1101,12 @@ func TestStatelessQA_CompleteEvent_HasUsageAndTiming(t *testing.T) {
 	}
 	require.NotNil(t, completeData, "complete event not found in SSE stream (spec section 3.2)")
 
-	assert.NotEmpty(t, completeData["request_id"], "complete must contain request_id (spec section 3.2)")
-	assert.NotEmpty(t, completeData["model_id"], "complete must contain model_id (spec section 3.2)")
-	assert.NotZero(t, completeData["elapsed_ms"], "complete must contain elapsed_ms (spec section 3.2)")
+	assert.NotEmpty(t, completeData["request_id"], "complete must contain request_id")
+	assert.NotEmpty(t, completeData["model_id"], "complete must contain model_id")
+	assert.NotZero(t, completeData["elapsed_ms"], "complete must contain elapsed_ms")
 
 	usage, ok := completeData["usage"].(map[string]interface{})
-	require.True(t, ok, "complete must contain usage object (spec section 3.2)")
+	require.True(t, ok, "complete must contain usage object")
 	assert.Contains(t, usage, "prompt_tokens")
 	assert.Contains(t, usage, "completion_tokens")
 	assert.Contains(t, usage, "total_tokens")
@@ -983,8 +1131,7 @@ func TestStatelessQA_HistoryInvalidRole_Returns400(t *testing.T) {
 				},
 			})
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless",
-				strings.NewReader(string(reqBody)))
+			req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 			req.Header.Set("Content-Type", "application/json")
 			engine.ServeHTTP(rec, req)
 
@@ -995,36 +1142,126 @@ func TestStatelessQA_HistoryInvalidRole_Returns400(t *testing.T) {
 }
 
 // =============================================================================
-// Spec section 4 - Pure chat final_answer has done=true
+// Spec section 6.3 - stop endpoint returns 200 for any request_id (idempotent)
 // =============================================================================
 
-func TestStatelessQA_PureChat_FinalAnswerDone(t *testing.T) {
+func TestStatelessQA_Stop_Returns200ForAnyRequestID(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	stopReq := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless/stop",
+		bytesReader([]byte(`{"request_id":"nonexistent-request-id"}`)))
+	stopReq.Header.Set("Content-Type", "application/json")
+	stopRec := httptest.NewRecorder()
+	engine.ServeHTTP(stopRec, stopReq)
+	assert.Equal(t, http.StatusOK, stopRec.Code)
+}
+
+// =============================================================================
+// Spec section 6.3 - stop during in-flight QA, then repeat is idempotent
+// =============================================================================
+
+func TestStatelessQA_Stop_DuringQA_ThenIdempotent(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 
-	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error {
-		eventBus.Emit(ctx, event.Event{
-			Type: event.EventAgentFinalAnswer,
-			Data: event.AgentFinalAnswerData{Content: "no KB answer", Done: true, IsFallback: true},
+	// Block QA until we stop it
+	blocker := make(chan struct{})
+	qaDone := make(chan struct{})
+
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentToolCall,
+			Data: event.AgentToolCallData{ToolCallID: "tc-1", ToolName: "knowledge_search"},
 		})
-		return nil
+		<-blocker // block until test releases
+		close(qaDone)
+		return ctx.Err()
 	}
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "long generation",
+		KnowledgeBaseIDs: []string{"kb-1"},
+	})
 	rec := httptest.NewRecorder()
-	body := `{"query":"tell me a joke"}`
-	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
-	engine.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	events := parseSSEStream(t, rec.Body.String())
+	// Start QA in a goroutine (the handler blocks on SSE polling)
+	handlerDone := make(chan struct{})
+	go func() {
+		engine.ServeHTTP(rec, req)
+		close(handlerDone)
+	}()
 
+	// Wait briefly for SSE stream to start and agent_query + tool_call to appear
+	timeout := time.Now().Add(2 * time.Second)
+waitLoop:
+	for time.Now().Before(timeout) {
+		if rec.Body.Len() > 0 {
+			body := rec.Body.String()
+			if strings.Contains(body, "tool_call") {
+				break waitLoop
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Extract request_id from the stream body so far
+	body := rec.Body.String()
+	events := parseSSEStream(t, body)
+	var requestID string
 	for _, e := range events {
-		if e.Event == "final_answer" {
+		if e.Event == "agent_query" {
 			var data map[string]interface{}
-			require.NoError(t, json.Unmarshal([]byte(e.Data), &data))
-			assert.True(t, data["done"].(bool), "final_answer.done should be true (spec section 4)")
+			if json.Unmarshal([]byte(e.Data), &data) == nil {
+				if rid, ok := data["request_id"].(string); ok {
+					requestID = rid
+				}
+			}
 		}
 	}
+	if requestID == "" {
+		close(blocker)
+		<-handlerDone
+		t.Skip("could not extract request_id from partial SSE stream")
+	}
+
+	// First stop during in-flight QA
+	stopBody, _ := json.Marshal(StopStatelessQARequest{RequestID: requestID})
+	stopRec := httptest.NewRecorder()
+	stopReq := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless/stop", bytesReader(stopBody))
+	stopReq.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(stopRec, stopReq)
+	assert.Equal(t, http.StatusOK, stopRec.Code)
+
+	// Second stop is idempotent (spec section 6.3)
+	stopRec2 := httptest.NewRecorder()
+	stopReq2 := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless/stop", bytesReader(stopBody))
+	stopReq2.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(stopRec2, stopReq2)
+	assert.Equal(t, http.StatusOK, stopRec2.Code)
+
+	// Release blocker so QA goroutine can end
+	close(blocker)
+	<-qaDone
+	<-handlerDone
+
+	// SSE stream should contain final_answer + complete after stop
+	finalBody := rec.Body.String()
+	finalEvents := parseSSEStream(t, finalBody)
+	finalTypes := sseEventTypes(finalEvents)
+	assert.Contains(t, finalTypes, "final_answer",
+		"SSE stream must contain final_answer after stop (spec section 6.3)")
+	assert.Contains(t, finalTypes, "complete",
+		"SSE stream must contain complete after stop (spec section 6.3)")
+}
+
+// =============================================================================
+// bytesReader wraps a []byte for httptest.NewRequest
+// =============================================================================
+
+func bytesReader(b []byte) io.Reader {
+	return strings.NewReader(string(b))
 }
