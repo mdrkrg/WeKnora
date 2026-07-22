@@ -15,7 +15,7 @@
 | Local Query Expansion (本地启发式) | no | yes (可选) | yes |
 | Rerank | yes | yes | yes |
 | Merge | yes | yes | yes |
-| Filter Top K | yes | yes | yes |
+| MMR Select Top K | yes | yes | yes |
 | LLM 答案生成 | no | no | yes |
 | 返回格式 | `SearchResult[]` | `SearchResult[]` + 元数据 | SSE 流 |
 | 无状态 | yes | yes | yes |
@@ -61,14 +61,26 @@ Content-Type: `application/json`
 | `knowledge_base_id` | string | 否 | — | 单个知识库 ID（向后兼容）；与 `knowledge_base_ids` 合并 |
 | `knowledge_base_ids` | string[] | 否 | — | 多个知识库 ID 列表，跨知识库检索 |
 | `knowledge_ids` | string[] | 否 | — | 限定到指定知识（文件）；不传则在整库范围内搜索 |
-| `tag_ids` | string[] | 否 | — | Tag ID 列表，用于 KB 内过滤。仅在同时指定 `knowledge_base_id[s]` 时生效 |
-| `mentioned_items` | MentionedItem[] | 否 | — | scoped tag mentions，每个 item 指定绑定的 KB 上下文 |
-| `enable_query_understand` | bool | 否 | `true` | 是否启用 LLM 查询理解（查询改写 + 意图分类 + 实体提取） |
+| `tag_ids` | string[] | 否 | — | Tag ID 列表。服务端根据每个 Tag ID 的实际所属 KB 分组，并仅在该 KB 的检索范围内过滤；Tag ID 所属 KB 必须位于请求的有效 KB 范围内 |
+| `mentioned_items` | MentionedItem[] | 否 | — | scoped tag mentions。用于显式指定 Tag ID 与所属 KB 的绑定关系 |
+| `enable_query_understand` | bool | 否 | `true` | 是否启用 LLM 查询理解。启用后执行查询改写和意图分类；满足知识图谱条件时还会执行独立的实体提取 |
 | `enable_query_expansion` | bool | 否 | `true` | 是否启用本地查询扩展（低召回时触发，无 LLM 调用） |
-| `chat_model_id` | string | 否 | 自动选择 | 覆盖查询理解阶段使用的 chat model。不传时自动选择 Tenant 默认 KnowledgeQA 模型。接受 UUID 或 Tenant 内唯一的模型名称 |
+| `chat_model_id` | string | 否 | Tenant 默认模型 | 查询理解使用的 KnowledgeQA 模型。接受模型 ID 或当前 Tenant 可访问模型中的唯一名称；不传时使用 Tenant 唯一的默认 KnowledgeQA 模型。`enable_query_understand=false` 时忽略此字段 |
 | `history` | HistoryMessage[] | 否 | `[]` | 对话历史，用于查询改写的多轮上下文消解 |
 
-> 必须指定 `knowledge_base_id` / `knowledge_base_ids` / `knowledge_ids` / `tag_ids` 中的至少一个。
+> 必须至少指定一个知识库 ID、一个 Knowledge ID，或一个包含有效 `id` 和 `kb_id` 的 Tag mention。裸 `tag_ids` 不能在没有任何 KB 或 Knowledge 范围时单独构成检索范围。
+
+检索范围按以下规则组合：
+
+- `knowledge_base_id` 与 `knowledge_base_ids` 合并并去重；不同 KB 的最终范围取并集。
+- `tag_ids` 按 Tag ID 查询实际所属 KB；多个 Tag 使用 OR 语义。同名 Tag 在不同 KB 中具有不同 ID，必须分别传入这些 ID。
+- 请求的有效 KB 范围包括显式指定的 KB，以及由 `knowledge_ids` 和 scoped Tag mention 解析出的 KB。
+- 裸 `tag_ids` 中的每个 Tag 所属 KB 必须位于请求的有效 KB 范围内，否则返回 400。
+- 裸 `tag_ids` 与 `mentioned_items` 中的 Tag ID 合并去重；同一 Tag 若同时出现，`kb_id` 必须与该 Tag 的实际所属 KB 一致。
+- `mentioned_items` 中用于本端点检索的 item 必须为 `type="tag"`，且 `id`、`kb_id` 均非空；其 `id` 与 `kb_id` 必须匹配，否则返回 400。
+- 同一 KB 同时指定 Knowledge ID 和 Tag 时，取“指定 Knowledge”与“带任一指定 Tag 的 Knowledge”的交集。
+- 如果某 KB 被无 Tag 条件地整库选中，则同一 KB 中重复出现的 `knowledge_ids` 不会缩小整库范围；属于其他 KB 的 `knowledge_ids` 作为其他检索目标加入并集。
+- 最终范围为空是合法检索结果，返回 200 和空的 `results`；范围表达不合法才返回 400。
 
 ### 2.4 HistoryMessage 结构
 
@@ -100,14 +112,18 @@ Content-Type: `application/json`
 | `service_id` | string | 父 MCP service ID（对 MCP tool mentions 有效） |
 | `skill_name` | string | preloaded agent skill 名称（对 skill mentions 有效） |
 
+对于本端点，`mentioned_items` 仅接受 `type="tag"` 的 item；`kb`、`file`、`mcp`、`skill` 类型不参与知识检索范围，传入时返回 400。Tag item 必须同时提供非空的 `id` 和 `kb_id`，且该 Tag 实际属于该 KB。
+
 ### 2.6 认证
 
 支持以下认证方式：
 
-- `X-API-Key` header（API Key 必须有 `retrieve` 能力）
-- Session cookie（已登录用户）
+- `Authorization: Bearer <JWT>`：JWT 用户必须是当前 Tenant 的有效成员，且至少具有 Viewer 角色
+- `X-API-Key: <key>`：API Key 必须具有 `retrieve` capability 或 `full_access` 权限
 
-认证失败返回 401。无权访问目标 KB / Knowledge / 模型返回 403。
+调用者应只提供一种认证凭证。同时提供时，有效的 Bearer JWT 优先；Bearer JWT 未通过认证时再尝试 `X-API-Key`。
+
+缺失、无效或过期的认证凭证，或者凭证无法解析出有效 Tenant 时返回 401。身份有效但角色/capability 不足，或者无权访问目标 KB / Knowledge / Tag / 模型时返回 403。
 
 ## 3. 响应
 
@@ -135,9 +151,8 @@ Content-Type: `application/json`
         "chunk_index": 0,
         "start_at": 120,
         "end_at": 500,
-        "seq": 1,
         "score": 0.95,
-        "match_type": "hybrid",
+        "match_type": "vector",
         "chunk_type": "text",
         "parent_chunk_id": "",
         "sub_chunk_id": [],
@@ -151,14 +166,18 @@ Content-Type: `application/json`
 }
 ```
 
+成功响应的 JSON 结构固定为 `success` + `data`。`success` 必须为 `true`；`data.rewrite_query`、`data.intent` 和 `data.results` 始终存在。无检索结果时 `data.results` 返回空数组 `[]`，不返回 `null`，也不省略该字段。
+
+`SearchResult` 的字段始终存在；没有值时使用以下表示：字符串为 `""`，整数或浮点数为 `0`，字符串数组为 `[]`，对象为 `{}`。因此 `metadata` 始终是字符串键值对象，`chunk_metadata` 始终是 JSON 对象，`sub_chunk_id` 始终是字符串数组，`image_info` 始终是 JSON 字符串。
+
 ### 3.2 顶层字段
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `success` | bool | 请求是否成功 |
 | `data.rewrite_query` | string | LLM 改写后的查询。未启用查询理解时等于原始 `query` |
-| `data.intent` | string | 意图分类结果。可能的值见 [3.3 意图分类](#33-意图分类) |
-| `data.results` | SearchResult[] | 检索结果数组。字段结构见 [3.4 SearchResult](#34-searchresult) |
+| `data.intent` | string | 意图分类结果。可能的值见 [3.3 意图分类](#33-意图分类)。未启用查询理解时固定为 `kb_search` |
+| `data.results` | SearchResult[] | 检索结果数组。字段结构见 [3.4 SearchResult](#34-searchresult)。结果集合由 MMR 综合相关性与内容多样性选出；数组按已选结果的 `score` 降序排列，仅表示展示顺序 |
 
 ### 3.3 意图分类
 
@@ -174,22 +193,25 @@ Content-Type: `application/json`
 | `image_only` | 仅含图片的查询 | no（本端点不做图片理解） |
 | `doc_only` | 仅含附件的查询 | no（本端点不做附件理解） |
 
+当 `enable_query_understand=false` 时，不执行查询改写、意图分类或实体提取：`rewrite_query` 等于原始 `query`，`intent` 固定为 `kb_search`，`history` 不参与查询处理，并跳过 Entity Search。Chunk Search、Rerank、Merge 和 MMR Select Top K 继续执行；若 `enable_query_expansion=true`，Local Query Expansion 仍可按触发条件执行。
+
 当意图判定为无需检索时（如 `chitchat`），管线跳过所有检索阶段，`results` 返回空数组，`rewrite_query` 和 `intent` 正常返回。消费者可通过 `intent` 决定是否将 query 直接传递给 LLM。
 
 ### 3.4 SearchResult
 
 `results` 数组中每个元素的完整字段：
 
+本文所称**分块输入文本**，是指知识摄入过程中完成文档解析、格式转换和图片引用处理后，实际传给分块器的完整文本。例如，PDF / DOCX 对应解析后的 Markdown，CSV / JSON 对应转换后的 Markdown，手动录入内容对应去除首尾空白并完成图片引用处理后的文本。分块输入文本不是原始文件的二进制内容，也不一定与原始文件的可见文本逐字符一致。
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | string | Chunk ID |
 | `content` | string | Chunk 全文 |
 | `knowledge_id` | string | 所属 Knowledge（文件）ID |
-| `chunk_index` | int | Chunk 在文件中的序号 |
+| `chunk_index` | int | Chunk 在所属 Knowledge 文件中的序号；不表示本次响应中的排名 |
 | `knowledge_title` | string | 文件标题 |
-| `start_at` | int | Chunk 在原文中的起始偏移**（rune 索引，非字节）** |
-| `end_at` | int | Chunk 在原文中的结束偏移**（rune 索引，非字节）** |
-| `seq` | int | 检索结果中的原始排序序号 |
+| `start_at` | int | Chunk 对应范围在分块输入文本中的起始 rune 偏移，包含该位置；无可定位的源文本范围时为 `0` |
+| `end_at` | int | Chunk 对应范围在分块输入文本中的结束 rune 偏移，不包含该位置；无可定位的源文本范围时为 `0` |
 | `score` | float | Rerank 后归一化的最终相关性分数 |
 | `match_type` | string | 匹配类型。见 [3.5 MatchType](#35-matchtype) |
 | `sub_chunk_id` | string[] | 子 Chunk ID 列表（parent-child 分块时使用） |
@@ -207,6 +229,8 @@ Content-Type: `application/json`
 
 ### 3.5 MatchType
 
+本端点不直接序列化仓库内部的整数 `MatchType`。响应层将内部值转换为下列字符串；无法识别的内部值统一返回 `unknown`。本端点不返回 `hybrid`。
+
 | 值 | 说明 |
 |---|---|
 | `vector` | 向量语义匹配 |
@@ -219,6 +243,7 @@ Content-Type: `application/json`
 | `web_search` | 网络搜索结果 |
 | `direct_load` | 直接加载匹配 |
 | `data_analysis` | 数据分析匹配 |
+| `unknown` | 无法识别的内部匹配类型 |
 
 ---
 
@@ -227,14 +252,16 @@ Content-Type: `application/json`
 ### 4.1 整体流程
 
 ```
-QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE → FILTER_TOP_K → 返回
+QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE → MMR_SELECT_TOP_K → DISPLAY_SORT → 返回
 ```
 
 `QUERY_UNDERSTAND` 仅在 `enable_query_understand: true` 时执行。其余阶段始终执行。
 
 ### 4.2 Query Understanding（查询理解）
 
-当 `enable_query_understand: true` 时执行。此阶段调用 1 次 LLM（chat model），做三项处理：
+当 `enable_query_understand: true` 时执行。此阶段首先调用 1 次 LLM（chat model）完成查询改写和意图分类；满足实体提取条件时，再调用 1 次 LLM 提取实体。
+
+当 `enable_query_understand: false` 时跳过整个阶段，不调用 LLM，且不读取 `history`。管线在进入后续阶段前设置 `rewrite_query` 为原始 `query`、`intent` 为 `kb_search`、实体为空。
 
 **① 查询改写**：将口语化/模糊查询改写为检索友好形式。若 `history` 非空，利用对话历史做指代消解和上下文补充。
 
@@ -244,16 +271,17 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE →
 
 **② 意图分类**：将查询分为九种意图之一（见 [3.3 意图分类](#33-意图分类)）。下游据此决定是否跳过检索。结果写入 `intent`。
 
-**③ 实体提取**：从查询中提取关键实体（人名、产品名、术语等），供知识图谱检索使用。仅当以下条件全部满足时执行：
+**③ 实体提取（独立的可选 LLM 调用）**：从原始 `query` 中提取关键实体（人名、产品名、术语等），供知识图谱检索使用。仅当以下条件全部满足时执行：
 
+- `enable_query_understand=true`
 - 环境变量 `NEO4J_ENABLE=true`
 - 至少一个目标知识库的实体抽取配置已启用
 
 提取的实体写入内部状态，不在响应中公开。
 
-**模型选择**：使用 `chat_model_id` 指定的模型；未指定时自动选择 Tenant 默认 KnowledgeQA 模型（遍历 KB 的 `summary_model_id`，优先 Remote 来源模型，否则取第一个 KB 的配置模型）。
+**模型选择**：仅在 `enable_query_understand=true` 时解析模型。传入 `chat_model_id` 时，模型 ID 精确匹配优先；未匹配 ID 时按模型名称精确匹配。按名称必须恰好匹配一个当前 Tenant 可访问且可用的 KnowledgeQA 模型；匹配多个模型返回 400，未匹配或模型不可访问/不可用返回 403。未传 `chat_model_id` 时，当前 Tenant 必须恰好配置一个默认 KnowledgeQA 模型；没有默认模型或存在多个默认模型均返回 500。查询改写与意图分类、实体提取两次调用使用同一个已解析模型。模型选择不读取目标 KB 的 `summary_model_id`。
 
-**降级行为**：若 LLM 调用失败（网络错误、模型不可用等），`rewrite_query` 回退为原始 `query`，`intent` 回退为 `kb_search`，实体为空。管线继续执行后续阶段，不中断请求。
+**降级行为**：若查询改写和意图分类调用失败（网络错误、模型不可用等），或者调用结果无法解析、缺少有效字段、返回了 [3.3 意图分类](#33-意图分类) 之外的 `intent`，`rewrite_query` 回退为原始 `query`，`intent` 回退为 `kb_search`；满足实体提取条件时，实体提取仍使用原始 `query` 独立执行。若实体提取调用失败，实体为空并跳过 Entity Search。两种失败均不阻断 Chunk Search 和后续阶段。
 
 ### 4.3 Parallel Search（并行检索）
 
@@ -261,11 +289,13 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE →
 
 **① Chunk Search**：使用 `rewrite_query` 做**向量 + 关键词**混合检索。检索参数（`vector_threshold`、`keyword_threshold`、`embedding_top_k`）来自 Tenant RetrievalConfig。
 
-**② Entity Search**：使用查询理解阶段提取的实体，在知识图谱中查找关联的 chunk。仅在实体非空时执行。内部流程：
+**② Entity Search**：使用独立实体提取调用返回的实体，在知识图谱中查找关联的 chunk。仅在实体非空时执行。内部流程：
 
 - 对每个实体调 graph repository 搜索关联的 `GraphNode` + `GraphRelation`
 - 通过 graph node 反查关联 chunk（通过 graph → chunk 映射表）
 - 找到的 chunk 作为补充检索结果并入候选集
+
+Chunk Search 是核心检索阶段。任一目标 KB / Knowledge 的 Chunk Search 执行失败时，整个请求失败并返回 500，不返回其他目标的部分结果。检索成功但没有命中不是错误。
 
 **跳过条件**：若查询理解阶段判定无需检索（意图为 `chitchat` / `greeting` / `follow_up` / `web_search` / `image_only` / `doc_only`），整个并行检索跳过，`results` 为空数组。
 
@@ -284,7 +314,7 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE →
 
 ### 4.5 Rerank（重排序）
 
-使用 rerank 模型对合并后的候选集重新打分排序。rerank 模型从 Tenant RetrievalConfig 解析；未配置时自动选择第一个可用的 rerank 模型。
+使用 rerank 模型对候选集重新打分，并按 Tenant RetrievalConfig 的 `rerank_threshold` 过滤低相关性候选。此阶段产生最终 `score`，但不执行 Top K 选择；Top K 由 Merge 后的 MMR 阶段完成。rerank 模型从 Tenant RetrievalConfig 解析；未配置时自动选择第一个可用的 rerank 模型。没有可用 rerank 模型、模型加载失败或 rerank 调用失败时返回 500；rerank 成功但没有候选通过阈值时返回空结果。
 
 ### 4.6 Merge（合并）
 
@@ -292,39 +322,69 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE →
 
 - 按 `knowledge_id` + `chunk_type` 分组，合并重叠区间
 - Parent-child 分块展开：子 chunk 的 `parent_chunk_id` 指向父 chunk，merge 阶段将子 chunk 的内容范围展开到父 chunk
-- FAQ 类型 chunk 填充答案文本（`content` 为问题，`matched_content` 为匹配的问题文本）
+- FAQ 类型结果的 `content` 为格式化后的标准问题与答案；`matched_content` 为检索实际命中的标准问题或相似问题
 - 短上下文 chunk 通过 `pre_chunk_id` / `next_chunk_id` 链表扩展邻居 chunk
 - 最终去重（按 chunk ID + content signature）
 
-### 4.7 Filter Top K
+### 4.7 MMR Select Top K 与展示排序
 
-按 rerank 分数降序排序，取 Top K 条结果。K 值 = Tenant RetrievalConfig 的 `rerank_top_k`。
+Merge 完成后，使用 MMR（Maximal Marginal Relevance，最大边际相关性）从最终候选中选择最多 K 条结果。MMR 同时考虑候选的最终 `score` 和候选与已选结果之间的内容相似度，优先保留与查询相关且彼此不重复的结果。K 值 = Tenant RetrievalConfig 的 `rerank_top_k`。
+
+因此，最终入选集合不保证等于按 `score` 直接排序得到的前 K 条。MMR 完成选择后，仅对已经入选的结果按以下规则排序，以提供稳定的展示顺序：
+
+1. `score` 降序
+2. `knowledge_id` 升序
+3. `start_at` 升序
+4. `id` 升序
+
+展示排序不改变 MMR 已经确定的入选集合。返回数组保持该展示顺序；`chunk_index` 仅表示 Chunk 在文件中的位置，不表示响应排名。
 
 ## 5. 错误处理
 
-### 5.1 HTTP 级错误
+### 5.1 错误响应格式
 
-所有 HTTP 错误以非 SSE 的普通 JSON 返回：
+所有 HTTP 错误以非 SSE 的普通 JSON 返回，结构固定为：
 
-| 状态码 | 条件 |
-|---|---|
-| 400 | `query` 为空、无 `knowledge_base_ids` / `knowledge_ids` / `tag_ids`、仅提供 `tag_ids` 而无 KB、`history` 含非法 role（非 `user`/`assistant`）、`history` 超过 100 条 |
-| 401 | 未认证 |
-| 403 | 无权访问指定的 KB / Knowledge / 模型。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分具体原因 |
-| 413 | 请求体超过 10 MB |
-| 429 | 超出频率限制（见 [6. 频率限制](#6-频率限制)） |
-| 500 | 管线内部错误 |
+```json
+{
+  "success": false,
+  "error": {
+    "code": 1000,
+    "message": "query cannot be empty",
+    "details": null
+  }
+}
+```
 
-### 5.2 管线级降级
+`success` 必须为 `false`；错误响应不包含 `data`。`error.code` 为平台错误码整数，`error.message` 为人类可读文本；没有附加信息时 `error.details` 为 `null`。
+
+### 5.2 HTTP 级错误
+
+| 状态码 | `error.code` | 条件 |
+|---:|---:|---|
+| 400 | 1000 | `query` 为空、没有知识库/Knowledge/有效 Tag mention 作为检索范围、仅提供裸 `tag_ids` 而无 KB 或 Knowledge 范围、Tag 所属 KB 不在请求范围内、Tag mention 结构非法或类型不支持、`chat_model_id` 按名称匹配到多个模型、`history` 含非法 role（非 `user`/`assistant`）、`history` 超过 100 条 |
+| 401 | 1001 | 缺失、无效或过期的认证凭证，或认证凭证无法解析出有效 Tenant |
+| 403 | 1002 | 身份有效但 Tenant 角色低于 Viewer、API Key 既无 `retrieve` capability 也非 `full_access`，或无权访问指定的 KB / Knowledge / Tag / 模型。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分具体原因 |
+| 413 | 1011 | 请求体超过 10 MB |
+| 429 | 1006 | 超出频率限制（见 [6. 频率限制](#6-频率限制)） |
+| 500 | 1007 | Chunk Search 任一目标执行失败、没有可用 rerank 模型、rerank 模型加载/调用失败、Merge 或 MMR 失败、其他管线内部错误；或 `enable_query_understand=true`、未传 `chat_model_id` 时 Tenant 没有默认 KnowledgeQA 模型或存在多个默认 KnowledgeQA 模型 |
+| 504 | 1009 | 请求超过服务端整体超时时间 |
+
+### 5.3 管线级降级
+
+Query Understanding、Entity Extraction / Entity Search 和 Local Query Expansion 是可选增强阶段，失败时按下表降级。Chunk Search、Rerank、Merge 和 MMR Select Top K 是核心阶段，失败时不降级，也不返回部分或未经完整管线处理的结果。
 
 以下场景不返回 HTTP 错误，而是降级处理：
 
 | 场景 | 行为 |
 |---|---|
+| Query Understanding 未启用 | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，`history` 不参与处理，跳过实体提取和 Entity Search，继续 Chunk Search |
 | Query Understanding LLM 调用失败 | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，管线继续 |
+| Query Understanding 输出无法解析、缺少有效字段或返回未知 `intent` | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，管线继续 |
+| Entity Extraction LLM 调用失败 | 实体为空，跳过 Entity Search，Chunk Search 和后续阶段继续 |
 | 意图判定无需检索 | `results` = `[]`，`rewrite_query` 和 `intent` 正常返回 |
-| Entity Search 无可用知识图谱 | 仅返回 chunk search 结果 |
-| Local Query Expansion 未额外召回 | 不追加结果，管线继续 |
+| Entity Search 无可用知识图谱或执行失败 | 仅使用 Chunk Search 结果继续管线 |
+| Local Query Expansion 的部分或全部扩展查询失败，或未额外召回 | 忽略失败或无新增结果的扩展，使用初始 Chunk Search 结果继续管线 |
 | 检索结果为空 | `results` = `[]`，仍返回 `rewrite_query` + `intent` |
 | Neo4j 未启用 | 跳过实体提取和 entity search |
 
@@ -355,11 +415,12 @@ Retry-After header 包含建议重试秒数。
 1. **请求体大小**：最大 10 MB
 2. **History 限制**：最多 100 条消息，仅 `user` / `assistant` role
 3. **LLM 调用次数**：
-   - `enable_query_understand: true` → 1 次 LLM 调用（查询理解），token 预算 max 150
    - `enable_query_understand: false` → 0 次 LLM 调用
-4. **知识图谱依赖**：Entity Search 需同时满足 `NEO4J_ENABLE=true` + KB 已启用实体抽取 + 查询理解成功提取实体
-5. **模型标识**：`chat_model_id` 接受 UUID 或模型名称。名称唯一性由 Tenant 内模型 `name` 不可重复保证。若两者都不匹配，返回 403
-6. **超时**：服务端整体超时默认 120 秒（覆盖查询理解 + 检索全流程）。单次 LLM 调用超时由模型配置中的 `llm_call_timeout` 控制
-7. **Token 裁剪**：本端点不涉及答案生成的 token 裁剪。查询理解阶段有独立的 max token 限制（150）
-8. **分句**：WeKnora 不做分句。消费者根据 `content` + `start_at` / `end_at` 自行处理句子拆分和高亮定位
-9. **offset 语义**：`start_at` / `end_at` 为 rune 索引（非 UTF-8 字节），与原文 `content[start_at:end_at]` 字符级一致
+   - `enable_query_understand: true` 且未触发实体提取 → 1 次 LLM 调用（查询改写 + 意图分类）
+   - `enable_query_understand: true` 且触发实体提取 → 最多 2 次 LLM 调用（查询改写 + 意图分类、实体提取各 1 次）
+4. **知识图谱依赖**：Entity Search 需同时满足 `enable_query_understand=true` + `NEO4J_ENABLE=true` + KB 已启用实体抽取 + 独立实体提取调用成功返回至少一个实体
+5. **模型标识**：Tenant 可以配置多个 KnowledgeQA 模型，但必须恰好有一个默认 KnowledgeQA 模型。`chat_model_id` 接受模型 ID 或名称；名称必须在当前 Tenant 可访问的可用 KnowledgeQA 模型中唯一。名称匹配多个模型返回 400，ID 和名称均不匹配或模型不可访问/不可用返回 403。`enable_query_understand=false` 时不解析或校验 `chat_model_id`
+6. **超时**：服务端整体超时默认 120 秒（覆盖查询理解 + 检索全流程），超过时返回 504。单次 Query Understanding / Entity Extraction LLM 调用超时按可选增强阶段失败降级；单次 LLM 调用超时由模型配置中的 `llm_call_timeout` 控制
+7. **Token 裁剪**：本端点不涉及答案生成的 token 裁剪。查询改写和意图分类调用的 max completion token 为 150；实体提取是独立调用，不计入该 150 token 预算
+8. **分句**：WeKnora 不对返回的 `content` 做分句。消费者可以自行拆分 `content`；`start_at` / `end_at` 仅用于定位分块输入文本中的范围，不是 `content` 内的相对偏移
+9. **offset 语义**：`start_at` / `end_at` 使用分块输入文本的 rune 索引，表示左闭右开区间 `[start_at, end_at)`。当结果不存在可定位的源文本范围时（例如生成型 Chunk），两者均为 `0`，即 `[0,0)`。Merge、邻居扩展、父子分块解析或 FAQ 内容填充后，返回的 `content` 不保证等于分块输入文本的该区间，也不得将 `start_at` / `end_at` 直接作为返回 `content` 的切片下标
