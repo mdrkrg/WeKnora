@@ -554,6 +554,13 @@ func RegisterChatRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbacGua
 		knowledgeSearch.POST("", handler.SearchKnowledge)
 	}
 
+	knowledgeRetrieveGroup := r.Group("/knowledge-retrieve", g.Viewer())
+	knowledgeRetrieveGroup.Use(middleware.StatelessRateLimit())
+	knowledgeRetrieve := g.apiKeyGroup(knowledgeRetrieveGroup, apiKeyRetrieve(apiKeyFullAccess()))
+	{
+		knowledgeRetrieve.POST("", handler.KnowledgeRetrieve)
+	}
+
 	// Stateless chat endpoints (no session, no persistence)
 	statelessGroup := r.Group("/knowledge-chat-stateless", g.Viewer())
 	statelessGroup.Use(middleware.StatelessRateLimit())

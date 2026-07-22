@@ -868,6 +868,7 @@ func (s *sessionService) SearchKnowledge(ctx context.Context,
 			KeywordThreshold: rc.GetEffectiveKeywordThreshold(),
 			RerankTopK:       rc.GetEffectiveRerankTopK(),
 			RerankThreshold:  rc.GetEffectiveRerankThreshold(),
+			EnableQueryExpansion: retrieveExpansionFromContext(ctx),
 		},
 		PipelineState: types.PipelineState{
 			RewriteQuery: query,

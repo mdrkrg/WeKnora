@@ -1,5 +1,7 @@
 package types
 
+import "encoding/json"
+
 // KnowledgeRetrieveRequest is the request contract for POST /api/v1/knowledge-retrieve.
 type KnowledgeRetrieveRequest struct {
 	Query                 string           `json:"query"`
@@ -43,6 +45,22 @@ type KnowledgeRetrieveResult struct {
 	MatchedContent       string            `json:"matched_content"`
 	KnowledgeDescription string            `json:"knowledge_description"`
 	KnowledgeBaseID      string            `json:"knowledge_base_id"`
+}
+
+// MarshalJSON guarantees the retrieve contract's non-null collection/object
+// fields even when a zero-valued result reaches the response boundary.
+func (r KnowledgeRetrieveResult) MarshalJSON() ([]byte, error) {
+	type resultAlias KnowledgeRetrieveResult
+	if r.SubChunkID == nil {
+		r.SubChunkID = []string{}
+	}
+	if r.Metadata == nil {
+		r.Metadata = map[string]string{}
+	}
+	if len(r.ChunkMetadata) == 0 {
+		r.ChunkMetadata = JSON([]byte("{}"))
+	}
+	return json.Marshal(resultAlias(r))
 }
 
 type KnowledgeRetrieveResponse struct {
