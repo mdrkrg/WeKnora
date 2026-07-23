@@ -318,6 +318,10 @@ type OIDCAuthConfig struct {
 	UserInfoEndpoint      string               `yaml:"user_info_endpoint"     json:"user_info_endpoint"`
 	Scopes                []string             `yaml:"scopes"                 json:"scopes"`
 	UserInfoMapping       *OIDCUserInfoMapping `yaml:"user_info_mapping"      json:"user_info_mapping"`
+	// EmailFallbackDomain synthesizes a placeholder email as
+	// "<subject>@<EmailFallbackDomain>" when the OIDC provider does not
+	// return an email claim. Empty preserves the default "email required" behaviour.
+	EmailFallbackDomain string `yaml:"email_fallback_domain"  json:"email_fallback_domain"`
 }
 
 // PromptTemplateI18n holds localized name and description for a prompt template.
@@ -726,6 +730,9 @@ func applyOIDCEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OIDC_USER_INFO_MAPPING_EMAIL")); value != "" {
 		cfg.OIDCAuth.UserInfoMapping.Email = value
+	}
+	if value := strings.TrimSpace(os.Getenv("OIDC_AUTH_EMAIL_FALLBACK_DOMAIN")); value != "" {
+		cfg.OIDCAuth.EmailFallbackDomain = value
 	}
 
 	if cfg.OIDCAuth.ProviderDisplayName == "" {
