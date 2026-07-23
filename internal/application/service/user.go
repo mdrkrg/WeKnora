@@ -481,7 +481,7 @@ func (s *userService) LoginWithOIDC(
 		return nil, err
 	}
 	if strings.TrimSpace(userInfo.Email) == "" {
-		return nil, errors.New("OIDC provider did not return email")
+		return nil, errors.New("OIDC provider did not return email (set oidc_auth.email_fallback_domain to synthesize from subject)")
 	}
 
 	user, err := s.userRepo.GetUserByEmail(ctx, userInfo.Email)
@@ -1355,7 +1355,7 @@ func (s *userService) resolveOIDCUserInfo(ctx context.Context, cfg *config.OIDCA
 
 	info := &types.OIDCUserInfo{Claims: claims}
 	if sub, _ := claims["sub"].(string); sub != "" {
-		info.Subject = sub
+		info.Subject = strings.TrimSpace(sub)
 	}
 	info.Username = extractClaimAsString(claims, cfg.UserInfoMapping.Username)
 	info.Email = extractClaimAsString(claims, cfg.UserInfoMapping.Email)
@@ -1367,6 +1367,15 @@ func (s *userService) resolveOIDCUserInfo(ctx context.Context, cfg *config.OIDCA
 	}
 	if info.Username == "" && info.Email != "" {
 		info.Username = strings.Split(info.Email, "@")[0]
+	}
+	if strings.TrimSpace(info.Email) == "" {
+		if fallback := strings.TrimSpace(cfg.EmailFallbackDomain); fallback != "" && info.Subject != "" {
+			info.Email = info.Subject + "@" + fallback
+			logger.Infof(ctx, "OIDC email claim missing; synthesized %q from subject and email_fallback_domain", info.Email)
+			if info.Username == "" {
+				info.Username = info.Subject
+			}
+		}
 	}
 	return info, nil
 }
