@@ -20,7 +20,7 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 		if modelErr != nil {
 			return nil, modelErr
 		}
-		manage := &types.ChatManage{PipelineRequest: types.PipelineRequest{Query: req.Query, ChatModelID: modelID, QueryUnderstandModelID: modelID, EnableRewrite: true, MaxRounds: 0}, PipelineState: types.PipelineState{RewriteQuery: req.Query, Intent: types.IntentKBSearch}}
+		manage := &types.ChatManage{PipelineRequest: types.PipelineRequest{Query: req.Query, ChatModelID: modelID, QueryUnderstandModelID: modelID, EnableRewrite: s.cfg.Conversation.EnableRewrite, MaxRounds: 0}, PipelineState: types.PipelineState{RewriteQuery: req.Query, Intent: types.IntentKBSearch}}
 		for _, message := range req.History {
 			if message.Role == "user" {
 				manage.History = append(manage.History, &types.History{Query: message.Content})

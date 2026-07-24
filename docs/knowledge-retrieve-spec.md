@@ -63,7 +63,7 @@ Content-Type: `application/json`
 | `knowledge_ids` | string[] | 否 | — | 限定到指定知识（文件）；不传则在整库范围内搜索 |
 | `tag_ids` | string[] | 否 | — | Tag ID 列表。服务端根据每个 Tag ID 的实际所属 KB 分组，并仅在该 KB 的检索范围内过滤；Tag ID 所属 KB 必须位于请求的有效 KB 范围内 |
 | `mentioned_items` | MentionedItem[] | 否 | — | scoped tag mentions。用于显式指定 Tag ID 与所属 KB 的绑定关系 |
-| `enable_query_understand` | bool | 否 | `true` | 是否启用 LLM 查询理解。启用后执行查询改写和意图分类；满足知识图谱条件时还会执行独立的实体提取 |
+| `enable_query_understand` | bool | 否 | `true` | 是否启用 LLM 查询理解。启用后执行查询改写和意图分类；满足知识图谱条件时还会执行独立的实体提取。注意：当服务端全局 `enable_rewrite` 配置为 `false` 时，即便此字段为 `true`，查询理解阶段也会跳过（与 `/knowledge-chat-stateless` 行为一致） |
 | `enable_query_expansion` | bool | 否 | `true` | 是否启用本地查询扩展（低召回时触发，无 LLM 调用） |
 | `chat_model_id` | string | 否 | Tenant 默认模型 | 查询理解使用的 KnowledgeQA 模型。接受模型 ID 或当前 Tenant 可访问模型中的唯一名称；不传时使用 Tenant 唯一的默认 KnowledgeQA 模型。`enable_query_understand=false` 时忽略此字段 |
 | `history` | HistoryMessage[] | 否 | `[]` | 对话历史，用于查询改写的多轮上下文消解 |
@@ -259,7 +259,7 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE →
 
 ### 4.2 Query Understanding（查询理解）
 
-当 `enable_query_understand: true` 时执行。此阶段首先调用 1 次 LLM（chat model）完成查询改写和意图分类；满足实体提取条件时，再调用 1 次 LLM 提取实体。
+当 `enable_query_understand: true` 时执行。注意：此阶段额外受服务端全局 `enable_rewrite` 配置控制；当全局 `enable_rewrite` 为 `false` 时，查询理解整体跳过（与 stateless chat 行为一致）。启用时，此阶段首先调用 1 次 LLM（chat model）完成查询改写和意图分类；满足实体提取条件时，再调用 1 次 LLM 提取实体。
 
 当 `enable_query_understand: false` 时跳过整个阶段，不调用 LLM，且不读取 `history`。管线在进入后续阶段前设置 `rewrite_query` 为原始 `query`、`intent` 为 `kb_search`、实体为空。
 
@@ -379,6 +379,7 @@ Query Understanding、Entity Extraction / Entity Search 和 Local Query Expansio
 | 场景 | 行为 |
 |---|---|
 | Query Understanding 未启用 | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，`history` 不参与处理，跳过实体提取和 Entity Search，继续 Chunk Search |
+| 服务端全局 `enable_rewrite` 配置为 `false` | 等同于 Query Understanding 未启用（即使请求中 `enable_query_understand=true`），行为同上 |
 | Query Understanding LLM 调用失败 | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，管线继续 |
 | Query Understanding 输出无法解析、缺少有效字段或返回未知 `intent` | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，管线继续 |
 | Entity Extraction LLM 调用失败 | 实体为空，跳过 Entity Search，Chunk Search 和后续阶段继续 |
