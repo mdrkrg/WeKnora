@@ -483,6 +483,46 @@ func TestStatelessQA_TagIDsWithoutKBIDs_Returns400(t *testing.T) {
 }
 
 // =============================================================================
+// Spec section 2.2 - tag_ids with knowledge_base_ids must reach KnowledgeQA TagScopes
+// =============================================================================
+
+func TestStatelessQA_TagIDsWithKBIDs_PassesTagScopesToKnowledgeQA(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+	kbSvc.kbs = map[string]*types.KnowledgeBase{
+		"kb-1": {ID: "kb-1", TenantID: 1, Name: "test-kb"},
+	}
+
+	var capturedReq *types.QARequest
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		capturedReq = req
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "test tag filter",
+		KnowledgeBaseIDs: []string{"kb-1"},
+		TagIDs:           []string{"tag-1", "tag-2"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedReq, "QARequest must be captured by stub")
+	require.NotEmpty(t, capturedReq.TagScopes, "TagScopes must not be empty when tag_ids are provided")
+	assert.Len(t, capturedReq.TagScopes, 1)
+	assert.Equal(t, "kb-1", capturedReq.TagScopes[0].KnowledgeBaseID)
+	assert.ElementsMatch(t, []string{"tag-1", "tag-2"}, capturedReq.TagScopes[0].TagIDs)
+}
+
+// =============================================================================
 // Spec section 9 constraint 7 - history max 100 messages -> 400
 // =============================================================================
 
