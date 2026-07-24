@@ -197,6 +197,12 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 		}
 	}
 
+	// Convert request history to types.HistoryMessage
+	historyMessages := make([]types.HistoryMessage, 0, len(request.History))
+	for _, msg := range request.History {
+		historyMessages = append(historyMessages, types.HistoryMessage{Role: msg.Role, Content: msg.Content})
+	}
+
 	// Build QA request
 	qaReq := &types.QARequest{
 		Session:            transientSession,
@@ -208,6 +214,7 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 		TagScopes:          tagScopes,
 		WebSearchEnabled:   request.WebSearchEnabled,
 		SystemPrompt:       request.SystemPrompt,
+		History:            historyMessages,
 	}
 
 	logger.Infof(ctx, "Stateless QA: request_id=%s session=%s query=%s kb=%v model=%s",

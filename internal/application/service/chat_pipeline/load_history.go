@@ -32,6 +32,14 @@ func (p *PluginLoadHistory) ActivationEvents() []types.EventType {
 func (p *PluginLoadHistory) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
+	// If request already injected history (e.g. stateless chat), skip DB load.
+	if len(chatManage.History) > 0 {
+		pipelineInfo(ctx, "LoadHistory", "skipped", map[string]interface{}{
+			"session_id": chatManage.SessionID,
+			"reason":     "history_already_provided",
+		})
+		return next()
+	}
 	// chatManage.MaxRounds == 0 means multi-turn is explicitly disabled
 	// (e.g. by a custom agent with MultiTurnEnabled=false). Skip loading so
 	// history doesn't leak into the LLM context. We do NOT fall back to the

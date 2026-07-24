@@ -157,6 +157,18 @@ func (s *sessionService) KnowledgeQA(
 	// rewrite, fallback, FAQ strategy, history turns)
 	s.applyAgentOverridesToChatManage(ctx, req.CustomAgent, chatManage)
 
+	// Inject request history so QUERY_UNDERSTAND can use it for multi-turn rewrite.
+	// LOAD_HISTORY plugin will skip if History is already populated.
+	if len(req.History) > 0 {
+		for _, msg := range req.History {
+			if msg.Role == "user" {
+				chatManage.History = append(chatManage.History, &types.History{Query: msg.Content})
+			} else {
+				chatManage.History = append(chatManage.History, &types.History{Answer: msg.Content})
+			}
+		}
+	}
+
 	// Determine pipeline based on knowledge bases availability and web search setting
 	hasKB := len(knowledgeBaseIDs) > 0 || len(knowledgeIDs) > 0
 	needsRAG := hasKB || req.WebSearchEnabled
