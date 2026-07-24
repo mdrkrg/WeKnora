@@ -258,7 +258,7 @@ event: complete
 
 | 状态码 | 条件 |
 |--------|------|
-| 400 | 请求体格式错误、`query` 为空、`knowledge_ids` 提供但 `knowledge_base_ids` 为空、仅提供 `tag_ids` 而 `knowledge_base_ids` 为空 |
+| 400 | 请求体格式错误、`query` 为空、`knowledge_ids` 提供但 `knowledge_base_ids` 为空、仅提供 `tag_ids` 而 `knowledge_base_ids` 为空、`tag_ids` 与多个 `knowledge_base_ids` 同时提供（作用域歧义） |
 | 401 | 未认证 |
 | 403 | 无权访问指定的资源、或引用了不存在的 KB/Knowledge ID/模型。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分 KB/模型/Knowledge 的具体原因 |
 | 413 | 请求体超过 10 MB |
@@ -373,6 +373,8 @@ curl -X POST https://weknora/api/v1/knowledge-chat-stateless \
 | `TestStatelessQA_EmptyQuery_Returns400` | query 为空 → 400 |
 | `TestStatelessQA_KnowledgeIDsWithoutKBIDs_Returns400` | knowledge_ids 单独提供 → 400 |
 | `TestStatelessQA_TagIDsWithoutKBIDs_Returns400` | tag_ids 单独提供（无 KB） → 400 |
+| `TestStatelessQA_TagIDsWithMultipleKBIDs_Returns400` | tag_ids 与多个 KB 同时提供 → 400（作用域歧义） |
+| `TestStatelessQA_TagIDsWithKBIDs_PassesTagScopesToKnowledgeQA` | tag_ids 随单个 KB 提供 → 200，TagScopes 正确传递 |
 | `TestStatelessQA_HistoryExceeds100_Returns400` | history 超过 100 条 → 400 |
 | `TestStatelessQA_SystemRoleInHistory_Returns400` | history 含 role: "system" → 400 |
 | `TestStatelessQA_HistoryInvalidRole_Returns400` | history 含非法 role（admin/tool/function/空） → 400 |
