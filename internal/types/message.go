@@ -22,6 +22,13 @@ type History struct {
 	KnowledgeReferences References // Knowledge references used in the answer
 }
 
+// HistoryMessage represents a single message in the conversation history
+// passed by stateless chat or knowledge retrieve requests.
+type HistoryMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // MentionedItem represents a mentioned knowledge base or file
 type MentionedItem struct {
 	ID        string `json:"id"`
