@@ -86,6 +86,12 @@ func (s *sessionService) KnowledgeQA(
 	// Resolve retrieval tenant scope using shared helper
 	retrievalTenantID := s.resolveRetrievalTenantID(ctx, req)
 
+	// Load tenant-level retrieval config (replaces conversation config for retrieval params)
+	var rc *types.RetrievalConfig
+	if tenant, err := s.tenantService.GetTenantByID(ctx, retrievalTenantID); err == nil {
+		rc = tenant.RetrievalConfig
+	}
+
 	// Build unified search targets (computed once, used throughout pipeline)
 	searchTargets, err := s.buildSearchTargets(ctx, retrievalTenantID, knowledgeBaseIDs, knowledgeIDs, req.TagScopes)
 	if err != nil {
@@ -115,11 +121,11 @@ func (s *sessionService) KnowledgeQA(
 			KnowledgeBaseIDs:        knowledgeBaseIDs,
 			KnowledgeIDs:            knowledgeIDs,
 			SearchTargets:           searchTargets,
-			VectorThreshold:         s.cfg.Conversation.VectorThreshold,
-			KeywordThreshold:        s.cfg.Conversation.KeywordThreshold,
-			EmbeddingTopK:           s.cfg.Conversation.EmbeddingTopK,
-			RerankTopK:              s.cfg.Conversation.RerankTopK,
-			RerankThreshold:         s.cfg.Conversation.RerankThreshold,
+			VectorThreshold:         rc.GetEffectiveVectorThreshold(),
+			KeywordThreshold:        rc.GetEffectiveKeywordThreshold(),
+			EmbeddingTopK:           rc.GetEffectiveEmbeddingTopK(),
+			RerankTopK:              rc.GetEffectiveRerankTopK(),
+			RerankThreshold:         rc.GetEffectiveRerankThreshold(),
 			ChatModelID:             chatModelID,
 			SummaryConfig:           summaryConfig,
 			FallbackStrategy:        fallbackStrategy,
@@ -151,6 +157,20 @@ func (s *sessionService) KnowledgeQA(
 			MessageID:     req.AssistantMessageID,
 			UserMessageID: req.UserMessageID,
 		},
+	}
+
+	// Use rerank model from RetrievalConfig if set, otherwise auto-select the first available
+	if rc != nil && rc.RerankModelID != "" {
+		chatManage.RerankModelID = rc.RerankModelID
+	} else if s.modelService != nil {
+		if models, err := s.modelService.ListModels(ctx); err == nil {
+			for _, model := range models {
+				if model != nil && model.Type == types.ModelTypeRerank {
+					chatManage.RerankModelID = model.ID
+					break
+				}
+			}
+		}
 	}
 
 	// Apply custom agent overrides (system prompt, temperature, retrieval params,
