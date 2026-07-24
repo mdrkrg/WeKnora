@@ -105,6 +105,13 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 		return
 	}
 
+	// Validate bare tag_ids require exactly one knowledge_base_id (align with stateful path)
+	requestTagIDs := dedupRequestStrings(request.TagIDs)
+	if err := validateUnscopedTagIDs(requestTagIDs, request.KnowledgeBaseIDs); err != nil {
+		c.Error(errors.NewBadRequestError(err.Error()))
+		return
+	}
+
 	// Validate history message count (spec section 9 constraint 7: max 100)
 	if len(request.History) > MaxStatelessHistoryMessages {
 		c.Error(errors.NewBadRequestError(
@@ -181,11 +188,11 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 
 	// Build tag scopes from request tag_ids
 	tagScopes := make([]types.TagScope, 0)
-	if len(request.TagIDs) > 0 {
+	if len(requestTagIDs) > 0 {
 		for _, kbID := range request.KnowledgeBaseIDs {
 			tagScopes = append(tagScopes, types.TagScope{
 				KnowledgeBaseID: kbID,
-				TagIDs:          request.TagIDs,
+				TagIDs:          requestTagIDs,
 			})
 		}
 	}
