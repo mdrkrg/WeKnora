@@ -147,14 +147,17 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 	}
 
 	// Resolve summary_model_id (spec section 2.2)
-	// Priority: UUID exact match first, then name-based lookup.
-	// If not provided, use the tenant's default KnowledgeQA model.
-	summaryModelID, modelErr := h.resolveSummaryModel(ctx, tenantID, request.SummaryModelID)
+	// Rules: active KnowledgeQA models only; UUID exact first; name must match
+	// exactly one active model; empty requires exactly one default.
+	summaryModelID, modelErr := h.sessionService.ResolveKnowledgeQAModel(ctx, request.SummaryModelID)
 	if modelErr != nil {
 		logger.Errorf(ctx, "Stateless QA: model resolution failed for %q: %v",
 			secutils.SanitizeForLog(request.SummaryModelID), modelErr)
-		// Spec section 5.1: nonexistent model returns 403
-		c.Error(errors.NewForbiddenError("model not found or not accessible"))
+		if appErr, ok := errors.IsAppError(modelErr); ok {
+			c.Error(appErr)
+		} else {
+			c.Error(errors.NewForbiddenError("model not found or not accessible"))
+		}
 		return
 	}
 
@@ -618,53 +621,6 @@ func convertAndWriteStatelessSSE(
 // resolveSummaryModel resolves a summary_model_id to a concrete model ID.
 // Resolution order: UUID exact match, then name-based lookup.
 // If empty, returns the tenant's default KnowledgeQA model.
-func (h *Handler) resolveSummaryModel(ctx context.Context, tenantID uint64, input string) (string, error) {
-	if input == "" {
-		// Find default KnowledgeQA model for the tenant
-		if h.modelService != nil {
-			models, err := h.modelService.ListModels(ctx)
-			if err != nil {
-				return "", err
-			}
-			for _, m := range models {
-				if m.Type == types.ModelTypeKnowledgeQA && m.IsDefault {
-					return m.ID, nil
-				}
-			}
-			// Fallback: first KnowledgeQA model
-			for _, m := range models {
-				if m.Type == types.ModelTypeKnowledgeQA {
-					return m.ID, nil
-				}
-			}
-		}
-		return "", fmt.Errorf("no default KnowledgeQA model configured")
-	}
-
-	if h.modelService == nil {
-		return input, nil
-	}
-
-	// Try UUID exact match first
-	model, err := h.modelService.GetModelByID(ctx, input)
-	if err == nil && model != nil {
-		return model.ID, nil
-	}
-
-	// Try name-based lookup
-	models, listErr := h.modelService.ListModels(ctx)
-	if listErr != nil {
-		return "", fmt.Errorf("model resolution failed: %w", listErr)
-	}
-	for _, m := range models {
-		if m.Name == input && m.Type == types.ModelTypeKnowledgeQA {
-			return m.ID, nil
-		}
-	}
-
-	return "", fmt.Errorf("model not found: %s", input)
-}
-
 // writeSSEEvent writes a named SSE event in the spec format:
 //
 //	event: <eventType>

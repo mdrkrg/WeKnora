@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/models/asr"
@@ -40,6 +41,7 @@ import (
 type stubStatelessSessionService struct {
 	knowledgeQAFn      func(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error
 	createSessionCalls int
+	resolveKQAModelFn  func(ctx context.Context, requested string) (string, error)
 }
 
 func (s *stubStatelessSessionService) GetSession(_ context.Context, _ string) (*types.Session, error) {
@@ -110,6 +112,13 @@ func (s *stubStatelessSessionService) AgentQA(ctx context.Context, req *types.QA
 
 func (s *stubStatelessSessionService) SearchKnowledge(_ context.Context, _ []string, _ []string, _ []types.TagScope, _ string) ([]*types.SearchResult, error) {
 	return nil, nil
+}
+
+func (s *stubStatelessSessionService) ResolveKnowledgeQAModel(ctx context.Context, requested string) (string, error) {
+	if s.resolveKQAModelFn != nil {
+		return s.resolveKQAModelFn(ctx, requested)
+	}
+	return requested, nil
 }
 
 func (s *stubStatelessSessionService) UpdateSessionLastRequestState(_ context.Context, _ string, _ *types.SessionLastRequestState) error {
@@ -407,10 +416,10 @@ func defaultStubs() (*stubStatelessSessionService, *stubStatelessModelService, *
 	sessionSvc := &stubStatelessSessionService{}
 	modelSvc := &stubStatelessModelService{
 		modelsByID: map[string]*types.Model{
-			modelID: {ID: modelID, Name: "gpt-4o", Type: types.ModelTypeKnowledgeQA, TenantID: 1, IsDefault: true},
+			modelID: {ID: modelID, Name: "gpt-4o", Type: types.ModelTypeKnowledgeQA, TenantID: 1, IsDefault: true, Status: types.ModelStatusActive},
 		},
 		modelsByName: map[string]*types.Model{
-			"gpt-4o": {ID: modelID, Name: "gpt-4o", Type: types.ModelTypeKnowledgeQA, TenantID: 1, IsDefault: true},
+			"gpt-4o": {ID: modelID, Name: "gpt-4o", Type: types.ModelTypeKnowledgeQA, TenantID: 1, IsDefault: true, Status: types.ModelStatusActive},
 		},
 	}
 	kbSvc := &stubStatelessKBService{
@@ -419,6 +428,7 @@ func defaultStubs() (*stubStatelessSessionService, *stubStatelessModelService, *
 		},
 	}
 	streamMgr := &stubStatelessStreamManager{}
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 	return sessionSvc, modelSvc, kbSvc, streamMgr
 }
 
@@ -717,6 +727,7 @@ func TestStatelessQA_NonexistentModel_Returns403(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
 	modelSvc.modelsByID = map[string]*types.Model{}
 	modelSvc.modelsByName = map[string]*types.Model{}
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
 
@@ -953,11 +964,61 @@ func TestStatelessQA_RAG_SSEEventSequence(t *testing.T) {
 }
 
 // =============================================================================
+// Test helper: model resolution using a stub model service
+// =============================================================================
+
+func modelSvcResolver(modelSvc *stubStatelessModelService) func(ctx context.Context, requested string) (string, error) {
+	return func(ctx context.Context, requested string) (string, error) {
+		models, err := modelSvc.ListModels(ctx)
+		if err != nil {
+			return "", err
+		}
+		qa := make([]*types.Model, 0)
+		for _, m := range models {
+			if m != nil && m.Type == types.ModelTypeKnowledgeQA && m.Status == types.ModelStatusActive {
+				qa = append(qa, m)
+			}
+		}
+		if requested != "" {
+			for _, m := range qa {
+				if m.ID == requested {
+					return m.ID, nil
+				}
+			}
+			matches := make([]*types.Model, 0)
+			for _, m := range qa {
+				if m.Name == requested {
+					matches = append(matches, m)
+				}
+			}
+			if len(matches) > 1 {
+				return "", errors.NewBadRequestError("chat_model_id matches multiple models")
+			}
+			if len(matches) == 1 {
+				return matches[0].ID, nil
+			}
+			return "", errors.NewForbiddenError("model not found or not accessible")
+		}
+		defaults := make([]*types.Model, 0, 1)
+		for _, m := range qa {
+			if m.IsDefault {
+				defaults = append(defaults, m)
+			}
+		}
+		if len(defaults) != 1 {
+			return "", errors.NewInternalServerError("tenant must have exactly one default KnowledgeQA model")
+		}
+		return defaults[0].ID, nil
+	}
+}
+
+// =============================================================================
 // Spec section 2.2 - model resolution by name
 // =============================================================================
 
 func TestStatelessQA_ModelResolution_ByName(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	var resolvedModelID string
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
@@ -995,7 +1056,9 @@ func TestStatelessQA_ModelResolution_ByUUID(t *testing.T) {
 	modelUUID := uuid.New().String()
 	modelSvc.modelsByID[modelUUID] = &types.Model{
 		ID: modelUUID, Name: "uuid-model", Type: types.ModelTypeKnowledgeQA, TenantID: 1,
+		Status: types.ModelStatusActive,
 	}
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
 		resolvedModelID = req.SummaryModelID
@@ -1038,6 +1101,7 @@ func TestStatelessQA_ModelResolution_InactiveModel_Returns403(t *testing.T) {
 		TenantID: 1, Status: types.ModelStatusDownloading, IsDefault: false,
 	}
 	modelSvc.modelsByName["inactive-model"] = modelSvc.modelsByID[inactiveID]
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	// Test expects model resolution to fail before reaching QA; fail if QA is called.
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
@@ -1086,6 +1150,7 @@ func TestStatelessQA_ModelResolution_DuplicateName_Returns400(t *testing.T) {
 	modelSvc.listedModels = []*types.Model{
 		modelSvc.modelsByID[id1], modelSvc.modelsByID[id2],
 	}
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	// Test expects model resolution to fail before QA; safety net if not.
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
@@ -1128,6 +1193,7 @@ func TestStatelessQA_ModelResolution_NoDefault_Returns500(t *testing.T) {
 		TenantID: 1, Status: types.ModelStatusActive, IsDefault: false,
 	}
 	modelSvc.listedModels = []*types.Model{modelSvc.modelsByID[activeID]}
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	// Test expects model resolution to fail before QA; safety net if not.
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
@@ -1159,6 +1225,7 @@ func TestStatelessQA_ModelResolution_NoDefault_Returns500(t *testing.T) {
 
 func TestStatelessQA_DefaultModel_WhenNotSpecified(t *testing.T) {
 	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+	sessionSvc.resolveKQAModelFn = modelSvcResolver(modelSvc)
 
 	var resolvedModelID string
 	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
