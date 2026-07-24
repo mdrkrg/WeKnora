@@ -48,7 +48,7 @@
 | `query` | string | **是** | 用户自然语言问题 |
 | `knowledge_base_ids` | string[] | 否 | 限定检索的知识库。与 `knowledge_ids` 均为空时进入纯对话模式（不检索） |
 | `knowledge_ids` | string[] | 否 | 进一步在 KB 内限定到具体文件。若提供则 `knowledge_base_ids` 不可为空 |
-| `summary_model_id` | string | 否 | 指定对话模型。接受 UUID 或 Tenant 内唯一的模型名称，解析顺序：UUID 精确匹配优先，其次按名称查找。解析范围限定为当前 Tenant 的模型列表。不传则使用 Tenant 默认对话模型。引用不存在的模型返回 403 |
+| `summary_model_id` | string | 否 | 指定对话模型。解析规则：仅考虑当前 Tenant 内 `Type=KnowledgeQA` 且 `Status=Active` 的模型；UUID 精确匹配优先；按名称查找时必须恰好匹配一个活跃模型——匹配多个同名活跃模型返回 400，未匹配到任何活跃模型返回 403；未传时使用 Tenant 唯一的默认活跃 KnowledgeQA 模型——无默认模型或多于一个默认模型均返回 500 |
 | `web_search_enabled` | boolean | 否 | 是否补充网络搜索结果。默认 false |
 | `history` | Message[] | 否 | 调用方传入的历史对话轮次 |
 | `images` | Image[] | 否 | 多模态图片附件（base64） |
@@ -258,11 +258,12 @@ event: complete
 
 | 状态码 | 条件 |
 |--------|------|
-| 400 | 请求体格式错误、`query` 为空、`knowledge_ids` 提供但 `knowledge_base_ids` 为空、仅提供 `tag_ids` 而 `knowledge_base_ids` 为空、`tag_ids` 与多个 `knowledge_base_ids` 同时提供（作用域歧义） |
+| 400 | 请求体格式错误、`query` 为空、`knowledge_ids` 提供但 `knowledge_base_ids` 为空、仅提供 `tag_ids` 而 `knowledge_base_ids` 为空、`tag_ids` 与多个 `knowledge_base_ids` 同时提供（作用域歧义）、`summary_model_id` 按名称匹配到多个同名活跃模型 |
 | 401 | 未认证 |
 | 403 | 无权访问指定的资源、或引用了不存在的 KB/Knowledge ID/模型。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分 KB/模型/Knowledge 的具体原因 |
 | 413 | 请求体超过 10 MB |
 | 429 | 超过频率限制（每 Tenant 每分钟 60 次） |
+| 500 | 未传 `summary_model_id` 时 Tenant 无默认 KnowledgeQA 活跃模型或存在多个默认模型 |
 
 ### 5.2 SSE 流内错误
 
@@ -358,7 +359,7 @@ curl -X POST https://weknora/api/v1/knowledge-chat-stateless \
 6. **不修改**：此端点对 WeKnora 的 Tenant、KnowledgeBase、Knowledge、Chunk 等任何已有数据**零副作用**
 7. **请求体限制**：最大 10 MB。`history` 最多 100 条消息（50 轮）。单个 `attachment_uploads` 文件最大 5 MB（原始大小，服务端在 base64 解码后按实际字节数校验，不以声明值 `file_size` 为准）
 8. **频率限制**：每个 Tenant 每分钟最多 60 次请求。超出返回 429
-9. **模型标识**：`summary_model_id` 同时接受 UUID 和模型名称。名称唯一性由 WeKnora 现有约束保证（Tenant 内模型 `name` 不可重复），不存在歧义
+9. **模型标识**：`summary_model_id` 同时接受 UUID 和模型名称。仅考虑 `Type=KnowledgeQA` 且 `Status=Active` 的模型。名称匹配到多个活跃模型时返回 400。Tenant 必须恰好配置一个默认的活跃 KnowledgeQA 模型；0 或 >1 返回 500
 
 > **关于 `complete` 事件的 `model_id`**：该字段返回的是**解析后的模型 UUID**（即经过 UUID 精确匹配或名称查找后确定的实际模型 ID），而非请求时传入的原始值。若请求传入的是模型名称，服务端会先将其解析为 UUID 再返回。
 
@@ -397,6 +398,9 @@ curl -X POST https://weknora/api/v1/knowledge-chat-stateless \
 |------|------|
 | `TestStatelessQA_ModelResolution_ByName` | 按名称查找模型 |
 | `TestStatelessQA_ModelResolution_ByUUID` | UUID 精确匹配优先 |
+| `TestStatelessQA_ModelResolution_InactiveModel_Returns403` | 按名称匹配非活跃模型 → 403 |
+| `TestStatelessQA_ModelResolution_DuplicateName_Returns400` | 同名活跃模型 → 400 |
+| `TestStatelessQA_ModelResolution_NoDefault_Returns500` | 无默认模型，未传参数 → 500 |
 | `TestStatelessQA_DefaultModel_WhenNotSpecified` | 未传 summary_model_id → 使用 Tenant 默认 |
 
 ### 请求字段透传 — spec section 2.2

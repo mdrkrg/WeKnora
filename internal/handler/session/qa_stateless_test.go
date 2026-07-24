@@ -1023,6 +1023,137 @@ func TestStatelessQA_ModelResolution_ByUUID(t *testing.T) {
 }
 
 // =============================================================================
+// Spec section 2.2 - inactive model rejected
+// =============================================================================
+
+func TestStatelessQA_ModelResolution_InactiveModel_Returns403(t *testing.T) {
+	sessionSvc, _, kbSvc, streamMgr := defaultStubs()
+	modelSvc := &stubStatelessModelService{
+		modelsByID:   make(map[string]*types.Model),
+		modelsByName: make(map[string]*types.Model),
+	}
+	inactiveID := uuid.New().String()
+	modelSvc.modelsByID[inactiveID] = &types.Model{
+		ID: inactiveID, Name: "inactive-model", Type: types.ModelTypeKnowledgeQA,
+		TenantID: 1, Status: types.ModelStatusDownloading, IsDefault: false,
+	}
+	modelSvc.modelsByName["inactive-model"] = modelSvc.modelsByID[inactiveID]
+
+	// Test expects model resolution to fail before reaching QA; fail if QA is called.
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:          "hello",
+		SummaryModelID: "inactive-model",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"spec section 2.2: inactive model must be rejected with 403")
+}
+
+// =============================================================================
+// Spec section 2.2 - duplicate active name rejected
+// =============================================================================
+
+func TestStatelessQA_ModelResolution_DuplicateName_Returns400(t *testing.T) {
+	sessionSvc, _, kbSvc, streamMgr := defaultStubs()
+	modelSvc := &stubStatelessModelService{
+		modelsByID:   make(map[string]*types.Model),
+		modelsByName: make(map[string]*types.Model),
+	}
+	id1 := uuid.New().String()
+	id2 := uuid.New().String()
+	modelSvc.modelsByID[id1] = &types.Model{
+		ID: id1, Name: "dupe-name", Type: types.ModelTypeKnowledgeQA,
+		TenantID: 1, Status: types.ModelStatusActive, IsDefault: false,
+	}
+	modelSvc.modelsByID[id2] = &types.Model{
+		ID: id2, Name: "dupe-name", Type: types.ModelTypeKnowledgeQA,
+		TenantID: 1, Status: types.ModelStatusActive, IsDefault: false,
+	}
+	modelSvc.listedModels = []*types.Model{
+		modelSvc.modelsByID[id1], modelSvc.modelsByID[id2],
+	}
+
+	// Test expects model resolution to fail before QA; safety net if not.
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		t.Error("QA should not be reached when model resolution fails")
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:          "hello",
+		SummaryModelID: "dupe-name",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"spec section 2.2: duplicate active name must return 400")
+}
+
+// =============================================================================
+// Spec section 2.2 - no default active model returns 500
+// =============================================================================
+
+func TestStatelessQA_ModelResolution_NoDefault_Returns500(t *testing.T) {
+	sessionSvc, _, kbSvc, streamMgr := defaultStubs()
+	modelSvc := &stubStatelessModelService{
+		modelsByID:   make(map[string]*types.Model),
+		modelsByName: make(map[string]*types.Model),
+	}
+	activeID := uuid.New().String()
+	modelSvc.modelsByID[activeID] = &types.Model{
+		ID: activeID, Name: "some-model", Type: types.ModelTypeKnowledgeQA,
+		TenantID: 1, Status: types.ModelStatusActive, IsDefault: false,
+	}
+	modelSvc.listedModels = []*types.Model{modelSvc.modelsByID[activeID]}
+
+	// Test expects model resolution to fail before QA; safety net if not.
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		t.Error("QA should not be reached when model resolution fails")
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "hello",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"spec section 2.2: no default active model without summary_model_id must return 500")
+}
+
+// =============================================================================
 // Spec section 2.2 - default model when summary_model_id not provided
 // =============================================================================
 
