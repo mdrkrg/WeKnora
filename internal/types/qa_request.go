@@ -22,4 +22,5 @@ type QARequest struct {
 	QuotedContext      string             // Quoted message content from IM quote-reply (appended at LLM prompt stage, not used for retrieval)
 	SystemPrompt       string             // User-supplied system prompt appended to the base system prompt (stateless chat spec section 2.2)
 	Attachments        MessageAttachments // File attachments (processed and ready for prompt injection)
+	History            []HistoryMessage    // Conversation history for query rewrite (stateless chat)
 }

@@ -630,6 +630,46 @@ func TestStatelessQA_ValidHistoryRoles_Succeed(t *testing.T) {
 }
 
 // =============================================================================
+// Spec section 2.2 - history must be passed through to QARequest (Issue #3)
+// =============================================================================
+
+func TestStatelessQA_HistoryPassedToQARequest(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+
+	var capturedReq *types.QARequest
+	sessionSvc.knowledgeQAFn = func(ctx context.Context, req *types.QARequest, bus *event.EventBus) error {
+		capturedReq = req
+		bus.Emit(ctx, event.Event{
+			Type: event.EventAgentFinalAnswer,
+			Data: event.AgentFinalAnswerData{Content: "ok", Done: true},
+		})
+		return nil
+	}
+
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query: "hello",
+		History: []HistoryMessage{
+			{Role: "user", Content: "who are you"},
+			{Role: "assistant", Content: "I am a bot"},
+		},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedReq, "QARequest must be captured")
+	require.Len(t, capturedReq.History, 2, "history should contain 2 messages")
+	assert.Equal(t, "user", capturedReq.History[0].Role)
+	assert.Equal(t, "who are you", capturedReq.History[0].Content)
+	assert.Equal(t, "assistant", capturedReq.History[1].Role)
+	assert.Equal(t, "I am a bot", capturedReq.History[1].Content)
+}
+
+// =============================================================================
 // Spec section 9 constraint 7 - history at max 100 (boundary) succeeds
 // =============================================================================
 
