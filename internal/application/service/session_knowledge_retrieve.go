@@ -2,44 +2,21 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
+	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// RetrieveKnowledge executes the stateless retrieval-only path. It deliberately
-// delegates the core search stages to SearchKnowledge, which does not create
-// sessions or write messages.
+// RetrieveKnowledge executes the stateless retrieval-only pipeline.
+// It runs query understanding, parallel chunk+entity search, rerank, merge,
+// and top-K filtering on a single ChatManage instance — matching the spec
+// pipeline (docs/knowledge-retrieve-spec.md §4.1) and the stateless chat path.
 func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.KnowledgeRetrieveRequest) (*types.KnowledgeRetrieveData, error) {
 	ctx = context.WithValue(ctx, retrieveExpansionContextKey{}, req.EnableQueryExpansion == nil || *req.EnableQueryExpansion)
-	query := req.Query
-	intent := types.IntentKBSearch
-	understand := req.EnableQueryUnderstand == nil || *req.EnableQueryUnderstand
-	if understand && s.eventManager != nil {
-		modelID, modelErr := s.ResolveKnowledgeQAModel(ctx, strings.TrimSpace(req.ChatModelID))
-		if modelErr != nil {
-			return nil, modelErr
-		}
-		manage := &types.ChatManage{PipelineRequest: types.PipelineRequest{Query: req.Query, ChatModelID: modelID, QueryUnderstandModelID: modelID, EnableRewrite: s.cfg.Conversation.EnableRewrite, MaxRounds: 0}, PipelineState: types.PipelineState{RewriteQuery: req.Query, Intent: types.IntentKBSearch}}
-		for _, message := range req.History {
-			if message.Role == "user" {
-				manage.History = append(manage.History, &types.History{Query: message.Content})
-			} else {
-				manage.History = append(manage.History, &types.History{Answer: message.Content})
-			}
-		}
-		if modelID != "" {
-			if err := s.eventManager.Trigger(ctx, types.QUERY_UNDERSTAND, manage); err == nil {
-				if strings.TrimSpace(manage.RewriteQuery) != "" {
-					query = manage.RewriteQuery
-				}
-				intent = manage.Intent
-			}
-		}
-	}
-	if !intent.NeedsKBRetrieval() {
-		return &types.KnowledgeRetrieveData{RewriteQuery: query, Intent: intent, Results: []*types.KnowledgeRetrieveResult{}}, nil
-	}
+
+	// ---- resolve search scope ----
 	kbIDs := append([]string(nil), req.KnowledgeBaseIDs...)
 	if strings.TrimSpace(req.KnowledgeBaseID) != "" {
 		kbIDs = append(kbIDs, req.KnowledgeBaseID)
@@ -67,15 +44,135 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 			tagScopes = append(tagScopes, types.TagScope{KnowledgeBaseID: kbID, TagIDs: tagIDs})
 		}
 	}
-	results, err := s.SearchKnowledge(ctx, kbIDs, req.KnowledgeIDs, tagScopes, query)
+
+	// Get tenant
+	tenantID, ok := types.TenantIDFromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("tenant ID not found in context")
+	}
+
+	// Build search targets
+	searchTargets, err := s.buildSearchTargets(ctx, tenantID, kbIDs, req.KnowledgeIDs, tagScopes)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*types.KnowledgeRetrieveResult, 0, len(results))
-	for _, result := range results {
+	if len(searchTargets) == 0 {
+		return &types.KnowledgeRetrieveData{RewriteQuery: req.Query, Intent: types.IntentKBSearch, Results: []*types.KnowledgeRetrieveResult{}}, nil
+	}
+
+	// ---- build unified ChatManage ----
+	userID := types.SessionOwnerIDFromContext(ctx)
+
+	var rc *types.RetrievalConfig
+	if tenant, err := s.tenantService.GetTenantByID(ctx, tenantID); err == nil {
+		rc = tenant.RetrievalConfig
+	}
+
+	chatManage := &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			Query:                req.Query,
+			UserID:               userID,
+			KnowledgeBaseIDs:     kbIDs,
+			KnowledgeIDs:         req.KnowledgeIDs,
+			SearchTargets:        searchTargets,
+			MaxRounds:            s.cfg.Conversation.MaxRounds,
+			EmbeddingTopK:        rc.GetEffectiveEmbeddingTopK(),
+			VectorThreshold:      rc.GetEffectiveVectorThreshold(),
+			KeywordThreshold:     rc.GetEffectiveKeywordThreshold(),
+			RerankTopK:           rc.GetEffectiveRerankTopK(),
+			RerankThreshold:      rc.GetEffectiveRerankThreshold(),
+			EnableQueryExpansion: retrieveExpansionFromContext(ctx),
+			TenantID:             tenantID,
+		},
+		PipelineState: types.PipelineState{
+			RewriteQuery: req.Query,
+			Intent:       types.IntentKBSearch,
+		},
+	}
+
+	// Resolve rerank model
+	if models, err := s.modelService.ListModels(ctx); err == nil {
+		if rc != nil && rc.RerankModelID != "" {
+			chatManage.RerankModelID = rc.RerankModelID
+		} else {
+			for _, model := range models {
+				if model != nil && model.Type == types.ModelTypeRerank {
+					chatManage.RerankModelID = model.ID
+					break
+				}
+			}
+		}
+	}
+
+	// ---- query understand (when enabled) ----
+	understand := req.EnableQueryUnderstand == nil || *req.EnableQueryUnderstand
+	if understand && s.eventManager != nil {
+		modelID, modelErr := s.ResolveKnowledgeQAModel(ctx, strings.TrimSpace(req.ChatModelID))
+		if modelErr != nil {
+			return nil, modelErr
+		}
+		chatManage.ChatModelID = modelID
+		chatManage.QueryUnderstandModelID = modelID
+		chatManage.EnableRewrite = s.cfg.Conversation.EnableRewrite
+
+		// Inject request history for multi-turn rewrite
+		for _, message := range req.History {
+			if message.Role == "user" {
+				chatManage.History = append(chatManage.History, &types.History{Query: message.Content})
+			} else {
+				chatManage.History = append(chatManage.History, &types.History{Answer: message.Content})
+			}
+		}
+
+		if modelID != "" {
+			_ = s.eventManager.Trigger(ctx, types.QUERY_UNDERSTAND, chatManage)
+			// Degrade gracefully per spec §5.3: on failure, RewriteQuery=original,
+			// Intent=kb_search (already set in pipeline state defaults).
+		}
+	}
+
+	// After query understand, check whether retrieval is needed.
+	// If query understand failed, chatManage still holds the original fallbacks.
+	if !chatManage.NeedsRetrieval() {
+		return &types.KnowledgeRetrieveData{
+			RewriteQuery: chatManage.RewriteQuery,
+			Intent:       chatManage.Intent,
+			Results:      []*types.KnowledgeRetrieveResult{},
+		}, nil
+	}
+
+	// ---- search pipeline: CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE → FILTER_TOP_K ----
+	searchEvents := []types.EventType{
+		types.CHUNK_SEARCH_PARALLEL,
+		types.CHUNK_RERANK,
+		types.CHUNK_MERGE,
+		types.FILTER_TOP_K,
+	}
+
+	for _, event := range searchEvents {
+		err := s.eventManager.Trigger(ctx, event, chatManage)
+		if err == chatpipeline.ErrSearchNothing {
+			return &types.KnowledgeRetrieveData{
+				RewriteQuery: chatManage.RewriteQuery,
+				Intent:       chatManage.Intent,
+				Results:      []*types.KnowledgeRetrieveResult{},
+			}, nil
+		}
+		if err != nil {
+			return nil, err.Err
+		}
+	}
+
+	// ---- project results ----
+	out := make([]*types.KnowledgeRetrieveResult, 0, len(chatManage.MergeResult))
+	for _, result := range chatManage.MergeResult {
 		out = append(out, projectRetrieveResult(result))
 	}
-	return &types.KnowledgeRetrieveData{RewriteQuery: query, Intent: intent, Results: out}, nil
+	return &types.KnowledgeRetrieveData{
+		RewriteQuery: chatManage.RewriteQuery,
+		Intent:       chatManage.Intent,
+		Results:      out,
+	}, nil
 }
 
 type retrieveExpansionContextKey struct{}
