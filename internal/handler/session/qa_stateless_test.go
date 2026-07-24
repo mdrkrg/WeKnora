@@ -523,6 +523,28 @@ func TestStatelessQA_TagIDsWithKBIDs_PassesTagScopesToKnowledgeQA(t *testing.T) 
 }
 
 // =============================================================================
+// Spec section 2.2 - tag_ids with multiple knowledge_base_ids -> 400 (ambiguous scope)
+// =============================================================================
+
+func TestStatelessQA_TagIDsWithMultipleKBIDs_Returns400(t *testing.T) {
+	sessionSvc, modelSvc, kbSvc, streamMgr := defaultStubs()
+	engine := newStatelessQATestEngine(t, sessionSvc, modelSvc, kbSvc, streamMgr)
+
+	reqBody, _ := json.Marshal(CreateKnowledgeQAStatelessRequest{
+		Query:            "test tag filter",
+		KnowledgeBaseIDs: []string{"kb-1", "kb-2"},
+		TagIDs:           []string{"tag-1"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/knowledge-chat-stateless", bytesReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"tag_ids with multiple knowledge_base_ids must be rejected (ambiguous scope)")
+}
+
+// =============================================================================
 // Spec section 9 constraint 7 - history max 100 messages -> 400
 // =============================================================================
 
