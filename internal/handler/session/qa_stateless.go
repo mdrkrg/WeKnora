@@ -179,6 +179,17 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 		TenantID: tenantID,
 	}
 
+	// Build tag scopes from request tag_ids
+	tagScopes := make([]types.TagScope, 0)
+	if len(request.TagIDs) > 0 {
+		for _, kbID := range request.KnowledgeBaseIDs {
+			tagScopes = append(tagScopes, types.TagScope{
+				KnowledgeBaseID: kbID,
+				TagIDs:          request.TagIDs,
+			})
+		}
+	}
+
 	// Build QA request
 	qaReq := &types.QARequest{
 		Session:            transientSession,
@@ -187,6 +198,7 @@ func (h *Handler) KnowledgeQAStateless(c *gin.Context) {
 		SummaryModelID:     summaryModelID,
 		KnowledgeBaseIDs:   request.KnowledgeBaseIDs,
 		KnowledgeIDs:       request.KnowledgeIDs,
+		TagScopes:          tagScopes,
 		WebSearchEnabled:   request.WebSearchEnabled,
 		SystemPrompt:       request.SystemPrompt,
 	}
