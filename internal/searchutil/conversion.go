@@ -84,6 +84,14 @@ func ConvertWebSearchResults(
 			ImageInfo:         "",
 			KnowledgeFilename: "",
 			KnowledgeSource:   "web_search",
+			ContentSegments: []types.ContentSegment{{
+				Text:        content,
+				ChunkID:     chunkID,
+				KnowledgeID: chunkID,
+				SourceStart: 0,
+				SourceEnd:   utf8.RuneCountInString(content),
+				ChunkType:   string(types.ChunkTypeWebSearch),
+			}},
 		}
 
 		if webResult.PublishedAt != nil {

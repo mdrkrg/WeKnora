@@ -328,6 +328,14 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 		ChunkMetadata:     chunk.Metadata,
 		MatchedContent:    matchedContent,
 		KnowledgeBaseID:   knowledge.KnowledgeBaseID,
+		ContentSegments: []types.ContentSegment{{
+			Text:        chunk.Content,
+			ChunkID:     chunk.ID,
+			KnowledgeID: chunk.KnowledgeID,
+			SourceStart: chunk.StartAt,
+			SourceEnd:   chunk.EndAt,
+			ChunkType:   string(chunk.ChunkType),
+		}},
 	}
 }
 

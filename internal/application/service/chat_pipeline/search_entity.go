@@ -228,5 +228,13 @@ func chunk2SearchResult(chunk *types.Chunk, knowledge *types.Knowledge) *types.S
 		KnowledgeChannel:  knowledge.Channel,
 		ChunkMetadata:     chunk.Metadata,
 		KnowledgeBaseID:   knowledge.KnowledgeBaseID,
+		ContentSegments: []types.ContentSegment{{
+			Text:        chunk.Content,
+			ChunkID:     chunk.ID,
+			KnowledgeID: chunk.KnowledgeID,
+			SourceStart: chunk.StartAt,
+			SourceEnd:   chunk.EndAt,
+			ChunkType:   string(chunk.ChunkType),
+		}},
 	}
 }
