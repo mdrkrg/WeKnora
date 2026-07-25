@@ -45,7 +45,7 @@ type KnowledgeRetrieveResult struct {
 	MatchedContent       string            `json:"matched_content"`
 	KnowledgeDescription string            `json:"knowledge_description"`
 	KnowledgeBaseID      string             `json:"knowledge_base_id"`
-	ContentSegments       []ContentSegment   `json:"content_segments,omitempty"`
+	ContentSegments       []ContentSegment   `json:"content_segments"`
 }
 
 // MarshalJSON guarantees the retrieve contract's non-null collection/object
@@ -60,6 +60,9 @@ func (r KnowledgeRetrieveResult) MarshalJSON() ([]byte, error) {
 	}
 	if len(r.ChunkMetadata) == 0 {
 		r.ChunkMetadata = JSON([]byte("{}"))
+	}
+	if r.ContentSegments == nil {
+		r.ContentSegments = []ContentSegment{}
 	}
 	return json.Marshal(resultAlias(r))
 }

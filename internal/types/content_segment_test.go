@@ -194,7 +194,7 @@ func TestFullyOverlappedChunkProducesNoSegment(t *testing.T) {
 		name        string
 		aStart, aEnd int
 		bStart, bEnd int
-		expectBSeg  bool
+		expectBSeg  bool // true if B is NOT fully covered and should produce a segment
 	}{
 		{"fully inside", 0, 10, 3, 6, false},
 		{"fully inside at boundary", 0, 10, 0, 5, false},
@@ -456,28 +456,13 @@ func TestMapContentPositionAcrossTwoSegments(t *testing.T) {
 		{Text: "abc", ChunkID: "c1", KnowledgeID: "k1", SourceStart: 0, SourceEnd: 3, ChunkType: "text"},
 		{Text: "de", ChunkID: "c2", KnowledgeID: "k1", SourceStart: 5, SourceEnd: 7, ChunkType: "text"},
 	}
-	content := "abcde"
-
-	// Substring from offset 1 ("bcde") spans two segments.
-	// Part in seg0: runes 1..3 (2 runes) -> source [0+1, 0+3) = [1,3)
-	// Part in seg1: runes 0..2 (2 runes) -> source [5+0, 5+2) = [5,7)
-	// FIXED: len=4, not len=5. Let me recalculate.
-	// Substring "bcde" starts at offset 1, length 4.
-	// seg0 "abc", offset 1 = "bc" (2 runes)
-	// seg1 "de", offset 0 = "de" (2 runes, but we only take up to the offset within content)
-	//
-	// Actually, "bcde" starts at content rune position 1.
-	// seg0 covers content runes [0,3): "abc"
-	// seg1 covers content runes [3,5): "de"
-	// Substring "bcde" starts at 1, ends at 5.
-	// Part in seg0: runes [1,3) = "bc" -> 2 runes, source [1,3)
-	// Part in seg1: runes [3,5) = "de" -> 2 runes, source [5,7)
-	// FIXED THE LENGTH. Substring is "bcde" which is 4 runes total.
-
-	_ = content
 	_ = segs
 
-	// Part in seg0: offset 1 within content, seg0 covers [0,3) in content.
+	// Substring "bcde" at offset 1, length 4 spans two segments:
+	// seg0 (rune offsets [0,3) in content): "bc" at offset 1, len 2 -> source [0+1, 0+3) = [1,3)
+	// seg1 (rune offsets [3,5) in content): "de" at offset 0, len 2 -> source [5+0, 5+2) = [5,7)
+
+	// Part in seg0: offset 1 within content, seg0 covers content runes [0,3).
 	seg0Offset := 1
 	seg0Len := 2
 	seg0SourceStart := segs[0].SourceStart + seg0Offset
@@ -667,5 +652,28 @@ func TestKnowledgeRetrieveResultContentSegmentsInJSON(t *testing.T) {
 	// content_segments field must appear in the serialized output.
 	if !strings.Contains(raw, `"content_segments"`) {
 		t.Errorf("serialized JSON missing content_segments key: %s", raw)
+	}
+}
+
+func TestKnowledgeRetrieveResultContentSegmentsNilNormalized(t *testing.T) {
+	// sec 3.4: MarshalJSON normalizes nil ContentSegments to [] so the
+	// field is always present in serialized output.
+	in := KnowledgeRetrieveResult{
+		ID:      "r1",
+		Content: "abc",
+		Score:   0.9,
+		// ContentSegments left nil — MarshalJSON must emit "content_segments":[].
+	}
+	out, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	raw := string(out)
+	if !strings.Contains(raw, `"content_segments"`) {
+		t.Errorf("nil ContentSegments not normalized: %s", raw)
+	}
+	// Verify the field is present as an empty array, not as null or absent.
+	if !strings.Contains(raw, `"content_segments":[]`) && !strings.Contains(raw, `"content_segments": []`) {
+		t.Errorf("nil ContentSegments not emitted as empty array: %s", raw)
 	}
 }

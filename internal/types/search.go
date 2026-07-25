@@ -151,7 +151,7 @@ type SearchResult struct {
 
 	// ContentSegments partitions Content into per-chunk source mappings.
 	// Always at least one element.  Concat of all Text fields equals Content.
-	ContentSegments []ContentSegment `json:"content_segments,omitempty"`
+	ContentSegments []ContentSegment `json:"content_segments"`
 }
 
 // ContentSegment describes a contiguous portion of a merged SearchResult.Content
