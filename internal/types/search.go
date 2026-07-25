@@ -150,6 +150,22 @@ type SearchResult struct {
 	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
 }
 
+// ContentSegment describes a contiguous portion of a merged SearchResult.Content
+// and maps it back to the original source chunk and range.
+//
+// Contract: all segment Text fields concatenated in order equal Content.
+// For each segment, SourceEnd - SourceStart == len([]rune(Text)).
+// A [0,0) source range indicates a generated result with no locatable source.
+// Reference: docs/knowledge-retrieve-spec.md sec 3.4.1
+type ContentSegment struct {
+	Text        string `json:"text"`
+	ChunkID     string `json:"chunk_id"`
+	KnowledgeID string `json:"knowledge_id"`
+	SourceStart int    `json:"source_start"`
+	SourceEnd   int    `json:"source_end"`
+	ChunkType   string `json:"chunk_type"`
+}
+
 // SearchParams represents the search parameters
 type SearchParams struct {
 	QueryText            string    `json:"query_text"`
