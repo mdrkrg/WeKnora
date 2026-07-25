@@ -159,7 +159,17 @@ Content-Type: `application/json`
         "image_info": "",
         "metadata": {},
         "chunk_metadata": {},
-        "matched_content": ""
+        "matched_content": "",
+        "content_segments": [
+          {
+            "text": "登录认证失败时，首先检查用户名和密码是否正确...",
+            "chunk_id": "chunk-00000001",
+            "knowledge_id": "knowledge-00000001",
+            "source_start": 120,
+            "source_end": 500,
+            "chunk_type": "text"
+          }
+        ]
       }
     ]
   }
@@ -214,7 +224,7 @@ Content-Type: `application/json`
 | `end_at` | int | Chunk 对应范围在分块输入文本中的结束 rune 偏移，不包含该位置；无可定位的源文本范围时为 `0` |
 | `score` | float | Rerank 后归一化的最终相关性分数 |
 | `match_type` | string | 匹配类型。见 [3.5 MatchType](#35-matchtype) |
-| `sub_chunk_id` | string[] | 子 Chunk ID 列表（parent-child 分块时使用） |
+| `sub_chunk_id` | string[] | 合并过程中累积的所有参与 chunk ID（parent-child 子 chunk、重叠区间合并 chunk、邻居扩展 chunk 等），去重后的集合 |
 | `metadata` | object | 文件级自定义元数据（键值对） |
 | `chunk_type` | string | Chunk 类型：`text` / `parent_text` / `image_ocr` / `image_caption` / `summary` / `entity` / `relationship` / `faq` / `web_search` / `table_summary` / `table_column` / `wiki_page` |
 | `parent_chunk_id` | string | 父 Chunk ID（parent-child 分块时使用） |
@@ -226,6 +236,68 @@ Content-Type: `application/json`
 | `matched_content` | string | 实际匹配到的文本（FAQ 场景为匹配的问题文本） |
 | `knowledge_description` | string | 知识文件的描述/摘要 |
 | `knowledge_base_id` | string | 所属知识库 ID |
+| `content_segments` | ContentSegment[] | `content` 的构成段落列表。结构见 [3.4.1 ContentSegment](#341-contentsegment) |
+
+### 3.4.1 ContentSegment
+
+描述 `content` 中一个连续文本段落的来源信息。`content_segments` 数组始终至少包含一个元素；数组中各 segment 的 `text` 按原始顺序连接后等于 `content`。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `text` | string | 该 segment 在 `content` 中的文本内容。所有 segment 的 `text` 连接后等于完整的 `content` |
+| `chunk_id` | string | 该 segment 文本在原文中所属的 chunk ID |
+| `knowledge_id` | string | 所属 Knowledge（文件）ID |
+| `source_start` | int | Segment 文本在分块输入文本中的起始 rune 偏移（含）。意义与顶层 `start_at` 一致，但范围仅覆盖该 segment 的文本 |
+| `source_end` | int | Segment 文本在分块输入文本中的结束 rune 偏移（不含）。意义同上 |
+| `chunk_type` | string | 来源 chunk 的类型，值同顶层 `chunk_type` |
+
+**用途**：Merge、邻居扩展、父子分块解析等阶段会合并多个 chunk 的文本到统一的 `content` 字段。`content_segments` 将合并后的文本逐段映射回各自的原始 chunk 和源文本范围。
+
+示例（两个 chunk 合并后的 `content_segments`）：
+
+```json
+{
+  "content": "Chunk A 的文本内容...Chunk B 的文本内容...",
+  "content_segments": [
+    {
+      "text": "Chunk A 的文本内容...",
+      "chunk_id": "chunk-a",
+      "knowledge_id": "knowledge-00000001",
+      "source_start": 0,
+      "source_end": 480,
+      "chunk_type": "text"
+    },
+    {
+      "text": "Chunk B 的文本内容...",
+      "chunk_id": "chunk-b",
+      "knowledge_id": "knowledge-00000001",
+      "source_start": 500,
+      "source_end": 1020,
+      "chunk_type": "text"
+    }
+  ]
+}
+```
+
+`segment` 内的文本字符全部来源于对应 chunk 的源文本；`content` 不包含仅由合并产生的合成字符（如分隔符、连接符等）。`content` 中每个 rune 恰好属于一个 segment。
+
+**定位指引**：对于 `content` 中 rune 区间 `[pos, pos+len)` 内的任意子串，若其全部位于某个 segment `s` 的覆盖范围内，则该子串在分块输入文本中的对应 rune 区间为 `[s.source_start + offset, s.source_start + offset + len)`，其中 `offset` 是该子串在 `s.text` 内的起始 rune 偏移（以 0 为起点）。若子串跨越多个 segment 边界，原文范围由所属各 segment 的对应区间拼接表达。
+
+**Overlap 裁切**：当 Merge 阶段处理相邻 chunk 存在源范围重叠时，合并后 `content` 中的重叠文本仅保留一次。`content_segments` 必须满足以下不变式：
+
+- 所有 segment 的 `text` 按顺序连接后等于 `content`，相邻 segment 之间无重叠文本；
+- 对于每个 segment，`source_end - source_start == runeLen(text)` 恒成立；
+- 若某个 chunk 的全部内容已被前一 chunk 重叠覆盖（即去重后无独占文本），则该 chunk 不产生 segment。
+
+> `content_segments` 是 `content` 文本的无重叠分区，不是参与合并的全部 chunk 的完整列表。被完全重叠覆盖的 chunk 不产生 segment，其语义内容已由覆盖它的 segment 承载。需要检索完整参与 chunk 列表的消费者应读取顶层 `sub_chunk_id` 字段。
+
+因此消费者可基于 segment 长度累加计算子串在 `content` 中的准确位置，再获取对应 segment 的 `source_start` / `source_end` 计算原文绝对偏移。整个定位流程是 rune 级确定性的，无需依赖文本匹配或处理多个候选 segment 的二义性。
+
+对于来自单个未经合并的 chunk 的结果，`content_segments` 仍包含一个 segment，其 `source_start` / `source_end` 与顶层的 `start_at` / `end_at` 一致。消费者可以始终使用 `content_segments` 进行定位，无需根据合并状态切换路径。
+
+`chunk_type = "summary"` 或 `"entity"` 等生成型结果的 segment 中 `source_start` / `source_end` 均为 `0`；消费者应将其视为仅快照可用。`source_start` / `source_end` 为 `0`（即 `[0, 0)`）的 segment 的 `text` 必须非空；伪 range 不得用于在分块输入文本中切片。
+
+> `content_segments` 中每个 segment 的 `text` 是 `content` 的真实组成部分。消费者使用 segment 信息定位时，`source_start` / `source_end` 指向的是分块输入文本，不是 `content` 本身。顶层 `start_at` / `end_at` 在存在 content 合并时不能代表 `content` 完整范围，此时应使用 `content_segments`。详见 [8.9 offset 语义](#89-offset-语义)。
 
 ### 3.5 MatchType
 
@@ -326,6 +398,8 @@ Chunk Search 是核心检索阶段。任一目标 KB / Knowledge 的 Chunk Searc
 - 短上下文 chunk 通过 `pre_chunk_id` / `next_chunk_id` 链表扩展邻居 chunk
 - 最终去重（按 chunk ID + content signature）
 
+以上每种合并操作（重叠区间合并、父子分块展开、邻居扩展等）在修改 `content` 的同时，对应地在 `content_segments` 中追加或更新 segment，详见 [3.4.1 ContentSegment](#341-contentsegment)。
+
 ### 4.7 MMR Select Top K 与展示排序
 
 Merge 完成后，使用 MMR（Maximal Marginal Relevance，最大边际相关性）从最终候选中选择最多 K 条结果。MMR 同时考虑候选的最终 `score` 和候选与已选结果之间的内容相似度，优先保留与查询相关且彼此不重复的结果。K 值 = Tenant RetrievalConfig 的 `rerank_top_k`。
@@ -424,4 +498,14 @@ Retry-After header 包含建议重试秒数。
 6. **超时**：服务端整体超时默认 120 秒（覆盖查询理解 + 检索全流程），超过时返回 504。单次 Query Understanding / Entity Extraction LLM 调用超时按可选增强阶段失败降级；单次 LLM 调用超时由模型配置中的 `llm_call_timeout` 控制
 7. **Token 裁剪**：本端点不涉及答案生成的 token 裁剪。查询改写和意图分类调用的 max completion token 为 150；实体提取是独立调用，不计入该 150 token 预算
 8. **分句**：WeKnora 不对返回的 `content` 做分句。消费者可以自行拆分 `content`；`start_at` / `end_at` 仅用于定位分块输入文本中的范围，不是 `content` 内的相对偏移
-9. **offset 语义**：`start_at` / `end_at` 使用分块输入文本的 rune 索引，表示左闭右开区间 `[start_at, end_at)`。当结果不存在可定位的源文本范围时（例如生成型 Chunk），两者均为 `0`，即 `[0,0)`。Merge、邻居扩展、父子分块解析或 FAQ 内容填充后，返回的 `content` 不保证等于分块输入文本的该区间，也不得将 `start_at` / `end_at` 直接作为返回 `content` 的切片下标
+9. **offset 语义**：
+
+   `start_at` / `end_at` 使用分块输入文本的 rune 索引，表示左闭右开区间 `[start_at, end_at)`。当结果不存在可定位的源文本范围时（例如生成型 Chunk），两者均为 `0`。
+
+   经过 Merge、邻居扩展、父子分块解析等合并阶段后，`content` 可能由多个 chunk 的文本拼接而成。顶层 `start_at` / `end_at` 保存合并前主导 chunk（首个）的原始范围，不包括后续追加 chunk 的文本覆盖范围。消费者必须使用 `content_segments` 进行精确定位：
+
+   - 找到子串所属的 segment 在 `content_segments` 数组中的位置和偏移；
+   - 使用该 segment 的 `source_start` / `source_end` 计算子串在分块输入文本中的绝对 rune 偏移；
+   - 不直接将顶层 `start_at` / `end_at` 作为 `content` 的切片下标使用。
+
+   对于来自单个未经合并的 chunk 的结果，`content_segments` 仍包含一个 segment，其 `source_start` / `source_end` 与顶层的 `start_at` / `end_at` 一致。消费者可以始终使用 `content_segments` 进行定位，无需根据合并状态切换路径。
