@@ -44,7 +44,8 @@ type KnowledgeRetrieveResult struct {
 	ChunkMetadata        JSON              `json:"chunk_metadata"`
 	MatchedContent       string            `json:"matched_content"`
 	KnowledgeDescription string            `json:"knowledge_description"`
-	KnowledgeBaseID      string            `json:"knowledge_base_id"`
+	KnowledgeBaseID      string             `json:"knowledge_base_id"`
+	ContentSegments       []ContentSegment   `json:"content_segments,omitempty"`
 }
 
 // MarshalJSON guarantees the retrieve contract's non-null collection/object

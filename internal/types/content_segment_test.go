@@ -52,17 +52,19 @@ func TestContentSegmentJSONRoundTrip(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestContentSegmentsAtLeastOne(t *testing.T) {
-	content := "some content"
-	seg := ContentSegment{
-		Text:        content,
-		ChunkID:     "ck1",
-		KnowledgeID: "k1",
-		SourceStart: 0,
-		SourceEnd:   len([]rune(content)),
-		ChunkType:   "text",
+	// sec 3.4.1: content_segments array always contains at least one element.
+	sr := SearchResult{
+		Content: "some content",
+		ContentSegments: []ContentSegment{{
+			Text: "some content", ChunkID: "ck1", KnowledgeID: "k1",
+			SourceStart: 0, SourceEnd: 12, ChunkType: "text",
+		}},
 	}
-	if seg.Text == "" {
-		t.Fatal("text must be non-empty for non-zero source range")
+	if len(sr.ContentSegments) < 1 {
+		t.Fatal("content_segments must have at least one element")
+	}
+	if len(sr.ContentSegments) == 0 {
+		t.Fatal("content_segments array must not be empty")
 	}
 }
 
@@ -187,30 +189,149 @@ func TestNoOverlapBetweenAdjacentSegments(t *testing.T) {
 }
 
 func TestFullyOverlappedChunkProducesNoSegment(t *testing.T) {
-	// A fully overlapped chunk contributes no unique text, so it does not
-	// appear in content_segments.
-	// The covering chunk's segment carries the content; sub_chunk_id
-	// carries the participant list.
-	cover := ContentSegment{
-		Text:        "full content",
-		ChunkID:     "c1",
-		KnowledgeID: "k1",
-		SourceStart: 0,
-		SourceEnd:   12,
-		ChunkType:   "text",
+	// sec 3.4.1 overlap rule: a chunk whose entire source range falls
+	// within a preceding chunk's range contributes no unique text and
+	// must not produce a segment in content_segments.
+	tests := []struct {
+		name        string
+		aStart, aEnd int
+		bStart, bEnd int
+		expectBSeg  bool
+	}{
+		{"fully inside", 0, 10, 3, 6, false},
+		{"fully inside at boundary", 0, 10, 0, 5, false},
+		{"fully inside end boundary", 0, 10, 5, 10, false},
+		{"partial overlap (extends past)", 0, 10, 5, 15, true},
+		{"no overlap (adjacent)", 0, 10, 10, 20, true},
+		{"no overlap (gap)", 0, 10, 20, 30, true},
 	}
-	// Fully overlapped chunk B would be entirely within A's range;
-	// it contributes no unique text, so it does not appear.
-	_ = cover
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isFullyCovered := tt.bStart >= tt.aStart && tt.bEnd <= tt.aEnd
+			if isFullyCovered == tt.expectBSeg {
+				t.Errorf("b [%d,%d) inside a [%d,%d): fullyCovered=%v, expectBSeg=%v",
+					tt.bStart, tt.bEnd, tt.aStart, tt.aEnd, isFullyCovered, tt.expectBSeg)
+			}
+		})
+	}
+}
 
-	// Validate that a segment list built from such overlap would not include
-	// an entry for the fully-covered chunk.  We construct the expected output
-	// and assert the absent chunk ID is not present.
-	segments := []ContentSegment{cover}
-	for _, s := range segments {
-		if s.ChunkID == "c2" {
-			t.Errorf("fully covered chunk c2 must not appear in segments")
+func TestFullOverlapExcludesChunkFromSegments(t *testing.T) {
+	// Apply the overlap rule to produce segments.
+	// Chunk A: [0,10), Chunk B: [3,6) fully inside -> only A in segments.
+	type chunk struct {
+		id          string
+		start, end  int
+		text        string
+	}
+	chunks := []chunk{
+		{id: "cA", start: 0, end: 10, text: "abcdefghij"},
+		{id: "cB", start: 3, end: 6, text: "def"},
+	}
+	var segments []ContentSegment
+	prevEnd := 0
+	for _, ch := range chunks {
+		if ch.start >= ch.end {
+			continue
 		}
+		if ch.start >= prevEnd {
+			segments = append(segments, ContentSegment{
+				Text:        ch.text,
+				ChunkID:     ch.id,
+				KnowledgeID: "k1",
+				SourceStart: ch.start,
+				SourceEnd:   ch.end,
+				ChunkType:   "text",
+			})
+			prevEnd = ch.end
+			continue
+		}
+		// Partial overlap: only non-overlapped portion produces a segment.
+		if ch.end > prevEnd {
+			trim := prevEnd - ch.start
+			text := string([]rune(ch.text)[trim:])
+			segments = append(segments, ContentSegment{
+				Text:        text,
+				ChunkID:     ch.id,
+				KnowledgeID: "k1",
+				SourceStart: ch.start + trim,
+				SourceEnd:   ch.end,
+				ChunkType:   "text",
+			})
+			prevEnd = ch.end
+		}
+		// ch.end <= prevEnd: fully covered, no segment.
+	}
+	// Verify cB is not present.
+	for _, s := range segments {
+		if s.ChunkID == "cB" {
+			t.Errorf("fully covered chunk cB must not appear in segments: %+v", s)
+		}
+	}
+	if len(segments) < 1 {
+		t.Fatal("must have at least one segment")
+	}
+}
+
+func TestPartialOverlapTrimsOneSegment(t *testing.T) {
+	// sec 3.4.1: when chunks overlap partially, the later chunk's text
+	// has the overlapping prefix removed and source_start is adjusted.
+	chunkA := ContentSegment{Text: "abcdef", ChunkID: "cA", KnowledgeID: "k1", SourceStart: 0, SourceEnd: 6, ChunkType: "text"}
+	chunkB := ContentSegment{Text: "cdefgh", ChunkID: "cB", KnowledgeID: "k1", SourceStart: 2, SourceEnd: 8, ChunkType: "text"}
+
+	// Overlap: A [0,6), B [2,8) -> overlap region [2,6)
+	// B's trimmed text = B.text[6-2:] = "gh"
+	overlapStart := chunkB.SourceStart
+	if chunkA.SourceEnd > overlapStart {
+		overlapStart = chunkA.SourceEnd
+	}
+	trim := overlapStart - chunkB.SourceStart
+	trimmedText := string([]rune(chunkB.Text)[trim:])
+	wantText := "gh"
+	if trimmedText != wantText {
+		t.Errorf("trimmed text = %q, want %q", trimmedText, wantText)
+	}
+	wantStart := chunkB.SourceStart + trim
+	if wantStart != 6 {
+		t.Errorf("adjusted source_start = %d, want 6", wantStart)
+	}
+	// Invariant still holds for trimmed segment.
+	wantEnd := chunkB.SourceEnd
+	if wantEnd-wantStart != utf8.RuneCountInString(trimmedText) {
+		t.Errorf("trimmed source range [%d,%d) span %d != text rune count %d",
+			wantStart, wantEnd, wantEnd-wantStart, utf8.RuneCountInString(trimmedText))
+	}
+}
+
+func TestFullyCoveredChunkInSubChunkIDNotInSegments(t *testing.T) {
+	// sec 3.4.1: a fully covered chunk contributes no segment but its
+	// chunk ID remains in SubChunkID so consumers can enumerate all
+	// merged participants.
+	sr := SearchResult{
+		Content:   "abcdefghij",
+		StartAt:   0,
+		EndAt:     10,
+		SubChunkID: []string{"cA", "cB"},
+		ContentSegments: []ContentSegment{
+			{Text: "abcdefghij", ChunkID: "cA", KnowledgeID: "k1",
+				SourceStart: 0, SourceEnd: 10, ChunkType: "text"},
+		},
+	}
+	// cB is fully covered: appears in SubChunkID, not in ContentSegments.
+	for _, s := range sr.ContentSegments {
+		if s.ChunkID == "cB" {
+			t.Errorf("fully covered chunk cB must not appear in content_segments")
+		}
+	}
+	found := false
+	for _, id := range sr.SubChunkID {
+		if id == "cB" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("fully covered chunk cB must appear in SubChunkID")
 	}
 }
 
@@ -219,28 +340,36 @@ func TestFullyOverlappedChunkProducesNoSegment(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestSingleChunkSegmentMatchesTopLevelFields(t *testing.T) {
-	// For an unmerged single-chunk result, the segment source_start/end
-	// must match the top-level start_at/end_at.
+	// sec 3.4.1: for an unmerged single-chunk result, content_segments
+	// has exactly one segment whose source_start/end match the top-level
+	// SearchResult start_at/end_at.
 	text := "hello world"
-	topStart := 100
-	topEnd := topStart + utf8.RuneCountInString(text) // 111
-	seg := ContentSegment{
-		Text:        text,
-		ChunkID:     "ck1",
-		KnowledgeID: "k1",
-		SourceStart: topStart,
-		SourceEnd:   topEnd,
-		ChunkType:   "text",
+	runes := utf8.RuneCountInString(text)
+	sr := SearchResult{
+		Content: text,
+		StartAt: 100,
+		EndAt:   100 + runes,
+		ContentSegments: []ContentSegment{{
+			Text:        text,
+			ChunkID:     "ck1",
+			KnowledgeID: "k1",
+			SourceStart: 100,
+			SourceEnd:   100 + runes,
+			ChunkType:   "text",
+		}},
 	}
-	if seg.SourceStart != topStart {
-		t.Errorf("segment source_start %d != top-level start_at %d", seg.SourceStart, topStart)
+	if len(sr.ContentSegments) != 1 {
+		t.Fatalf("single chunk result must have 1 segment, got %d", len(sr.ContentSegments))
 	}
-	if seg.SourceEnd != topEnd {
-		t.Errorf("segment source_end %d != top-level end_at %d", seg.SourceEnd, topEnd)
+	seg := sr.ContentSegments[0]
+	if seg.SourceStart != sr.StartAt {
+		t.Errorf("segment source_start %d != SearchResult start_at %d", seg.SourceStart, sr.StartAt)
 	}
-	if seg.SourceEnd-seg.SourceStart != utf8.RuneCountInString(seg.Text) {
-		t.Errorf("source range span %d != text rune count %d",
-			seg.SourceEnd-seg.SourceStart, utf8.RuneCountInString(seg.Text))
+	if seg.SourceEnd != sr.EndAt {
+		t.Errorf("segment source_end %d != SearchResult end_at %d", seg.SourceEnd, sr.EndAt)
+	}
+	if seg.SourceEnd-seg.SourceStart != runes {
+		t.Errorf("source range span %d != text rune count %d", seg.SourceEnd-seg.SourceStart, runes)
 	}
 }
 
@@ -375,55 +504,55 @@ func TestMapContentPositionAcrossTwoSegments(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestMergedResultTopLevelRangeDoesNotCoverFullContent(t *testing.T) {
-	// After merge, top-level start_at/end_at reflect the first (dominant)
-	// chunk's range.  They do not cover text from subsequent chunks
-	// that were appended during merge.
-	topStart := 0
-	topEnd := 5 // first chunk: 5 runes
-
-	segments := []ContentSegment{
-		{Text: "first", ChunkID: "c1", KnowledgeID: "k1", SourceStart: 0, SourceEnd: 5, ChunkType: "text"},
-		{Text: "second", ChunkID: "c2", KnowledgeID: "k1", SourceStart: 10, SourceEnd: 16, ChunkType: "text"},
+	// sec 8.9: after merge, top-level start_at/end_at reflect the first
+	// (dominant) chunk's range.  They do not cover text from subsequent
+	// chunks that were appended during merge.
+	sr := SearchResult{
+		Content: "firstsecond",
+		StartAt: 0,
+		EndAt:   5,
+		ContentSegments: []ContentSegment{
+			{Text: "first", ChunkID: "c1", KnowledgeID: "k1", SourceStart: 0, SourceEnd: 5, ChunkType: "text"},
+			{Text: "second", ChunkID: "c2", KnowledgeID: "k1", SourceStart: 10, SourceEnd: 16, ChunkType: "text"},
+		},
 	}
-	content := "firstsecond"
-
-	// Top-level range only covers the first chunk.
-	if topEnd-topStart != utf8.RuneCountInString("first") {
-		t.Errorf("top-level range [%d,%d) covers %d runes but first chunk has %d",
-			topStart, topEnd, topEnd-topStart, utf8.RuneCountInString("first"))
+	// Top-level range only covers the first chunk (5 runes).
+	if sr.EndAt-sr.StartAt != utf8.RuneCountInString("first") {
+		t.Errorf("top-level range [%d,%d) covers %d runes, but first chunk has %d",
+			sr.StartAt, sr.EndAt, sr.EndAt-sr.StartAt, utf8.RuneCountInString("first"))
 	}
 	// content has more runes than top-level range describes.
-	contentRunes := utf8.RuneCountInString(content)
-	if topEnd-topStart >= contentRunes {
-		t.Errorf("top-level range covers %d runes but content has %d; must use content_segments for full coverage",
-			topEnd-topStart, contentRunes)
+	contentRunes := utf8.RuneCountInString(sr.Content)
+	if sr.EndAt-sr.StartAt >= contentRunes {
+		t.Errorf("top-level range covers %d runes but content has %d; content_segments must be used for full coverage",
+			sr.EndAt-sr.StartAt, contentRunes)
 	}
-	_ = segments // segments provide the full mapping
 }
 
 func TestConsumerUsesContentSegmentsNotTopLevelForMerged(t *testing.T) {
 	// sec 8.9: consumer must use content_segments for locating substrings
 	// in merged content, not top-level start_at/end_at.
-	segments := []ContentSegment{
-		{Text: "ab", ChunkID: "c1", KnowledgeID: "k1", SourceStart: 0, SourceEnd: 2, ChunkType: "text"},
-		{Text: "cd", ChunkID: "c2", KnowledgeID: "k1", SourceStart: 10, SourceEnd: 12, ChunkType: "text"},
+	sr := SearchResult{
+		Content: "abcd",
+		StartAt: 0,
+		EndAt:   2, // first chunk only
+		ContentSegments: []ContentSegment{
+			{Text: "ab", ChunkID: "c1", KnowledgeID: "k1", SourceStart: 0, SourceEnd: 2, ChunkType: "text"},
+			{Text: "cd", ChunkID: "c2", KnowledgeID: "k1", SourceStart: 10, SourceEnd: 12, ChunkType: "text"},
+		},
 	}
-	content := "abcd"
-	// Substring "cd" at content offset 2.
-	// Using content_segments: it falls in segment[1] at offset 0.
-	// Source range = [10, 12)
+	// Substring "cd" at content offset 2: falls in segment[1] at offset 0.
+	// Source range = [10, 12).
 	// If consumer naively used top-level start_at=0, end_at=2,
-	// they'd get [0+2, 0+4) = [2,4) which is wrong — that's not where
-	// "cd" comes from in the source.
+	// they'd get [0+2, 0+4) = [2,4) — which is wrong.
 	segIdx := 1
 	segOffset := 0
 	subLen := 2
-	gotStart := segments[segIdx].SourceStart + segOffset
+	gotStart := sr.ContentSegments[segIdx].SourceStart + segOffset
 	gotEnd := gotStart + subLen
 	if gotStart != 10 || gotEnd != 12 {
 		t.Errorf("consumer positioning via content_segments: [%d,%d), want [10,12)", gotStart, gotEnd)
 	}
-	_ = content
 }
 
 // --------------------------------------------------------------------------

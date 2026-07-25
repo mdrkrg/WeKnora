@@ -148,6 +148,10 @@ type SearchResult struct {
 
 	// KnowledgeBaseID is the ID of the knowledge base this result belongs to
 	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
+
+	// ContentSegments partitions Content into per-chunk source mappings.
+	// Always at least one element.  Concat of all Text fields equals Content.
+	ContentSegments []ContentSegment `json:"content_segments,omitempty"`
 }
 
 // ContentSegment describes a contiguous portion of a merged SearchResult.Content
