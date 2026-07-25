@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -62,9 +63,6 @@ func TestContentSegmentsAtLeastOne(t *testing.T) {
 	}
 	if len(sr.ContentSegments) < 1 {
 		t.Fatal("content_segments must have at least one element")
-	}
-	if len(sr.ContentSegments) == 0 {
-		t.Fatal("content_segments array must not be empty")
 	}
 }
 
@@ -577,5 +575,97 @@ func TestNoSyntheticCharactersInSegments(t *testing.T) {
 	if utf8.RuneCountInString(content) != total {
 		t.Errorf("content runes %d != segment rune total %d; synthetic characters detected",
 			utf8.RuneCountInString(content), total)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Scope 9: ContentSegments ChunkID membership (sec 3.4.1 + 3.4 sub_chunk_id)
+// --------------------------------------------------------------------------
+
+func TestContentSegmentsChunkIDsAreSubsetOfSubChunkID(t *testing.T) {
+	// Every ChunkID appearing in ContentSegments must also appear in
+	// SubChunkID.  The reverse is not required: SubChunkID may contain
+	// fully covered chunks that produced no segment.
+	sr := SearchResult{
+		Content:   "hello world",
+		SubChunkID: []string{"cA", "cB", "cC"},
+		ContentSegments: []ContentSegment{
+			{Text: "hello", ChunkID: "cA", KnowledgeID: "k1",
+				SourceStart: 0, SourceEnd: 5, ChunkType: "text"},
+			{Text: " world", ChunkID: "cC", KnowledgeID: "k1",
+				SourceStart: 6, SourceEnd: 12, ChunkType: "text"},
+		},
+	}
+	// cB is in SubChunkID (fully covered), cA and cC are in both.
+	for _, seg := range sr.ContentSegments {
+		found := false
+		for _, id := range sr.SubChunkID {
+			if id == seg.ChunkID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ContentSegments ChunkID %q missing from SubChunkID", seg.ChunkID)
+		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// Scope 10: KnowledgeRetrieveResult JSON round-trip (sec 3.4 field table)
+// --------------------------------------------------------------------------
+
+func TestKnowledgeRetrieveResultContentSegmentsJSONRoundTrip(t *testing.T) {
+	in := KnowledgeRetrieveResult{
+		ID:      "r1",
+		Content: "abcdef",
+		Score:   0.95,
+		ContentSegments: []ContentSegment{
+			{Text: "abc", ChunkID: "c1", KnowledgeID: "k1",
+				SourceStart: 0, SourceEnd: 3, ChunkType: "text"},
+			{Text: "def", ChunkID: "c2", KnowledgeID: "k1",
+				SourceStart: 10, SourceEnd: 13, ChunkType: "text"},
+		},
+	}
+	out, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back KnowledgeRetrieveResult
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.ContentSegments) != 2 {
+		t.Fatalf("ContentSegments length: got %d, want 2", len(back.ContentSegments))
+	}
+	if back.ContentSegments[0].ChunkID != "c1" {
+		t.Errorf("segment[0].chunk_id = %q, want c1", back.ContentSegments[0].ChunkID)
+	}
+	if back.ContentSegments[1].SourceEnd != 13 {
+		t.Errorf("segment[1].source_end = %d, want 13", back.ContentSegments[1].SourceEnd)
+	}
+}
+
+func TestKnowledgeRetrieveResultContentSegmentsInJSON(t *testing.T) {
+	in := KnowledgeRetrieveResult{
+		ID:              "r1",
+		Content:         "abc",
+		Score:           0.9,
+		ContentSegments: []ContentSegment{{
+			Text: "abc", ChunkID: "c1", KnowledgeID: "k1",
+			SourceStart: 0, SourceEnd: 3, ChunkType: "text",
+		}},
+	}
+	out, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	raw := string(out)
+	if !json.Valid([]byte(raw)) {
+		t.Fatalf("output is not valid JSON: %s", raw)
+	}
+	// content_segments field must appear in the serialized output.
+	if !strings.Contains(raw, `"content_segments"`) {
+		t.Errorf("serialized JSON missing content_segments key: %s", raw)
 	}
 }
