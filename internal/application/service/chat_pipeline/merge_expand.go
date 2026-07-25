@@ -253,20 +253,23 @@ func (p *PluginMerge) expandShortContextWithNeighbors(
 				})
 			}
 		}
-		// Truncation: if text was cut at the end, adjust the last segment's text.
+		// Truncation: if text was cut at the end, trim excess from the
+		// last segments until the total equals content length.
 		contentLen := runeLen(res.Content)
 		segsLen := 0
 		for _, s := range newSegs {
 			segsLen += runeLen(s.Text)
 		}
-		if segsLen > contentLen && len(newSegs) > 0 {
-			excess := segsLen - contentLen
+		excess := segsLen - contentLen
+		for excess > 0 && len(newSegs) > 0 {
 			last := &newSegs[len(newSegs)-1]
 			lastRunes := []rune(last.Text)
 			if excess < len(lastRunes) {
 				last.Text = string(lastRunes[:len(lastRunes)-excess])
-				last.SourceEnd = last.SourceStart + runeLen(last.Text)
+				last.SourceEnd = last.SourceStart + len(lastRunes) - excess
+				excess = 0
 			} else {
+				excess -= len(lastRunes)
 				newSegs = newSegs[:len(newSegs)-1]
 			}
 		}
