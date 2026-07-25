@@ -198,7 +198,11 @@ func projectRetrieveResult(result *types.SearchResult) *types.KnowledgeRetrieveR
 	if len(result.ChunkMetadata) > 0 {
 		chunkMetadata = result.ChunkMetadata
 	}
-	return &types.KnowledgeRetrieveResult{ID: result.ID, Content: result.Content, KnowledgeID: result.KnowledgeID, ChunkIndex: result.ChunkIndex, KnowledgeTitle: result.KnowledgeTitle, StartAt: result.StartAt, EndAt: result.EndAt, Score: result.Score, MatchType: retrieveMatchType(result.MatchType), SubChunkID: subChunkID, Metadata: metadata, ChunkType: result.ChunkType, ParentChunkID: result.ParentChunkID, ImageInfo: result.ImageInfo, KnowledgeFilename: result.KnowledgeFilename, KnowledgeSource: result.KnowledgeSource, KnowledgeChannel: result.KnowledgeChannel, ChunkMetadata: chunkMetadata, MatchedContent: result.MatchedContent, KnowledgeDescription: result.KnowledgeDescription, KnowledgeBaseID: result.KnowledgeBaseID}
+	contentSegments := result.ContentSegments
+	if contentSegments == nil {
+		contentSegments = []types.ContentSegment{}
+	}
+	return &types.KnowledgeRetrieveResult{ID: result.ID, Content: result.Content, KnowledgeID: result.KnowledgeID, ChunkIndex: result.ChunkIndex, KnowledgeTitle: result.KnowledgeTitle, StartAt: result.StartAt, EndAt: result.EndAt, Score: result.Score, MatchType: retrieveMatchType(result.MatchType), SubChunkID: subChunkID, Metadata: metadata, ChunkType: result.ChunkType, ParentChunkID: result.ParentChunkID, ImageInfo: result.ImageInfo, KnowledgeFilename: result.KnowledgeFilename, KnowledgeSource: result.KnowledgeSource, KnowledgeChannel: result.KnowledgeChannel, ChunkMetadata: chunkMetadata, MatchedContent: result.MatchedContent, KnowledgeDescription: result.KnowledgeDescription, KnowledgeBaseID: result.KnowledgeBaseID, ContentSegments: contentSegments}
 }
 
 func retrieveMatchType(mt types.MatchType) string {

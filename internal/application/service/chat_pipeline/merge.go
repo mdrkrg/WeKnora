@@ -330,6 +330,14 @@ func (p *PluginMerge) resolveParentChunks(
 			)
 			r.StartAt = parent.StartAt
 			r.EndAt = parent.EndAt
+			r.ContentSegments = []types.ContentSegment{{
+				Text:        r.Content,
+				ChunkID:     parent.ID,
+				KnowledgeID: parent.KnowledgeID,
+				SourceStart: parent.StartAt,
+				SourceEnd:   parent.EndAt,
+				ChunkType:   string(parent.ChunkType),
+			}}
 			assignScopedImageInfo(r, scopedImageInfo, r.ID)
 			if r.ImageInfo != "" {
 				r.ImageInfo = searchutil.FilterImageInfoByMatchRange(
@@ -375,6 +383,14 @@ func (p *PluginMerge) resolveParentChunks(
 			r.Content = sliced
 			r.StartAt = matchStart
 			r.EndAt = matchEnd
+			r.ContentSegments = []types.ContentSegment{{
+				Text:        sliced,
+				ChunkID:     contentSource.ID,
+				KnowledgeID: contentSource.KnowledgeID,
+				SourceStart: matchStart,
+				SourceEnd:   matchEnd,
+				ChunkType:   string(contentSource.ChunkType),
+			}}
 			assignScopedImageInfo(r, scopedImageInfo, textParent.ID)
 			if r.ImageInfo == "" && hitImageInfo != "" {
 				r.ImageInfo = searchutil.FilterImageInfoByContentURLs(r.Content, hitImageInfo)

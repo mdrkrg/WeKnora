@@ -38,11 +38,21 @@ func (p *PluginMerge) mergeOverlappingChunks(
 		// EndAt-StartAt 不一致——这两种情况都会让按位置裁剪错位、丢字或重复。
 		// StartAt/EndAt 仅用于估算搜索窗口大小。
 		if chunks[i].EndAt > lastChunk.EndAt {
+			beforeLen := runeLen(lastChunk.Content)
 			lastChunk.Content = searchutil.AppendWithOverlap(
 				lastChunk.Content, chunks[i].Content, lastChunk.EndAt-chunks[i].StartAt,
 			)
+			appendedLen := runeLen(lastChunk.Content) - beforeLen
 			lastChunk.EndAt = chunks[i].EndAt
 			lastChunk.SubChunkID = append(lastChunk.SubChunkID, chunks[i].ID)
+
+			// Adjust the incoming chunk's segments: trim the overlap prefix.
+			overlapLen := runeLen(chunks[i].Content) - appendedLen
+			if overlapLen > 0 && overlapLen < runeLen(chunks[i].Content) {
+				p.addTrimmedSegments(lastChunk, chunks[i], overlapLen)
+			} else {
+				p.copySegments(lastChunk, chunks[i])
+			}
 
 			if err := mergeImageInfo(ctx, lastChunk, chunks[i]); err != nil {
 				pipelineWarn(ctx, "Merge", "image_merge", map[string]interface{}{
@@ -131,4 +141,27 @@ func mergeImageInfo(ctx context.Context, target *types.SearchResult, source *typ
 		"image_refs": len(uniqueImageInfos),
 	})
 	return nil
+}
+
+// addTrimmedSegments copies segments from src to dst, trimming overlapLen
+// runes from the front of the first segment's text and adjusting its
+// source_start accordingly.  Fully trimmed segments (text becomes empty)
+// are skipped.
+func (p *PluginMerge) addTrimmedSegments(dst *types.SearchResult, src *types.SearchResult, overlapLen int) {
+	for i, seg := range src.ContentSegments {
+		if i == 0 && overlapLen > 0 {
+			runes := []rune(seg.Text)
+			if overlapLen >= len(runes) {
+				continue // fully consumed by overlap
+			}
+			seg.Text = string(runes[overlapLen:])
+			seg.SourceStart = seg.SourceStart + overlapLen
+		}
+		dst.ContentSegments = append(dst.ContentSegments, seg)
+	}
+}
+
+// copySegments appends all segments from src to dst without modification.
+func (p *PluginMerge) copySegments(dst *types.SearchResult, src *types.SearchResult) {
+	dst.ContentSegments = append(dst.ContentSegments, src.ContentSegments...)
 }

@@ -226,6 +226,52 @@ func (p *PluginMerge) expandShortContextWithNeighbors(
 			}
 		}
 
+		// Build segments: prev chunks (in original order) + existing segments + next chunks
+		var newSegs []types.ContentSegment
+		for _, id := range prevIDs {
+			if ch, ok := chunkMap[id]; ok && ch != nil && ch.Content != "" {
+				newSegs = append(newSegs, types.ContentSegment{
+					Text:        ch.Content,
+					ChunkID:     ch.ID,
+					KnowledgeID: ch.KnowledgeID,
+					SourceStart: ch.StartAt,
+					SourceEnd:   ch.EndAt,
+					ChunkType:   string(ch.ChunkType),
+				})
+			}
+		}
+		newSegs = append(newSegs, res.ContentSegments...)
+		for _, id := range nextIDs {
+			if ch, ok := chunkMap[id]; ok && ch != nil && ch.Content != "" {
+				newSegs = append(newSegs, types.ContentSegment{
+					Text:        ch.Content,
+					ChunkID:     ch.ID,
+					KnowledgeID: ch.KnowledgeID,
+					SourceStart: ch.StartAt,
+					SourceEnd:   ch.EndAt,
+					ChunkType:   string(ch.ChunkType),
+				})
+			}
+		}
+		// Truncation: if text was cut at the end, adjust the last segment's text.
+		contentLen := runeLen(res.Content)
+		segsLen := 0
+		for _, s := range newSegs {
+			segsLen += runeLen(s.Text)
+		}
+		if segsLen > contentLen && len(newSegs) > 0 {
+			excess := segsLen - contentLen
+			last := &newSegs[len(newSegs)-1]
+			lastRunes := []rune(last.Text)
+			if excess < len(lastRunes) {
+				last.Text = string(lastRunes[:len(lastRunes)-excess])
+				last.SourceEnd = last.SourceStart + runeLen(last.Text)
+			} else {
+				newSegs = newSegs[:len(newSegs)-1]
+			}
+		}
+		res.ContentSegments = newSegs
+
 		if prevContent != "" {
 			res.StartAt = baseChunk.StartAt - runeLen(prevContent)
 			if res.StartAt < 0 {
