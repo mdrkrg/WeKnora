@@ -85,6 +85,7 @@ func shouldTrace(c *gin.Context) bool {
 	// Online inference
 	switch {
 	case strings.HasPrefix(path, "/api/v1/knowledge-chat"),
+		strings.HasPrefix(path, "/api/v1/knowledge-retrieve"),
 		strings.HasPrefix(path, "/api/v1/agent-chat"),
 		strings.HasPrefix(path, "/api/v1/knowledge-search"),
 		strings.HasPrefix(path, "/api/v1/sessions") && strings.Contains(path, "generate_title"),
