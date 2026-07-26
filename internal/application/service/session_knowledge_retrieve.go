@@ -56,6 +56,12 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 	if err != nil {
 		return nil, err
 	}
+	// knowledge-retrieve uses hybrid search exclusively; no direct load.
+	for _, t := range searchTargets {
+		if t.Type == types.SearchTargetTypeKnowledge {
+			t.DisableDirectLoad = true
+		}
+	}
 	if len(searchTargets) == 0 {
 		return &types.KnowledgeRetrieveData{RewriteQuery: req.Query, Intent: types.IntentKBSearch, Results: []*types.KnowledgeRetrieveResult{}}, nil
 	}
@@ -90,15 +96,25 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 		},
 	}
 
-	// Resolve rerank model
-	if models, err := s.modelService.ListModels(ctx); err == nil {
-		if rc != nil && rc.RerankModelID != "" {
-			chatManage.RerankModelID = rc.RerankModelID
-		} else {
-			for _, model := range models {
-				if model != nil && model.Type == types.ModelTypeRerank {
-					chatManage.RerankModelID = model.ID
-					break
+	// Resolve rerank model: request override takes priority, then tenant config / auto-detect
+	chatManage.RerankModelID = ""
+	if strings.TrimSpace(req.RerankModelID) != "" {
+		resolved, err := s.ResolveRerankModel(ctx, req.RerankModelID)
+		if err != nil {
+			return nil, err
+		}
+		chatManage.RerankModelID = resolved
+	}
+	if chatManage.RerankModelID == "" {
+		if models, err := s.modelService.ListModels(ctx); err == nil {
+			if rc != nil && rc.RerankModelID != "" {
+				chatManage.RerankModelID = rc.RerankModelID
+			} else {
+				for _, model := range models {
+					if model != nil && model.Type == types.ModelTypeRerank {
+						chatManage.RerankModelID = model.ID
+						break
+					}
 				}
 			}
 		}

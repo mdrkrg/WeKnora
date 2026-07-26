@@ -13,6 +13,7 @@ type KnowledgeRetrieveRequest struct {
 	EnableQueryUnderstand *bool            `json:"enable_query_understand,omitempty"`
 	EnableQueryExpansion  *bool            `json:"enable_query_expansion,omitempty"`
 	ChatModelID           string           `json:"chat_model_id,omitempty"`
+	RerankModelID         string           `json:"rerank_model_id,omitempty"`
 	History               []HistoryMessage `json:"history,omitempty"`
 }
 
