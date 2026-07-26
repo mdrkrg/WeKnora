@@ -46,6 +46,7 @@ Content-Type: `application/json`
   "enable_query_understand": true,
   "enable_query_expansion": true,
   "chat_model_id": "model-uuid",
+  "rerank_model_id": "rerank-model-uuid",
   "history": [
     {"role": "user", "content": "登录功能怎么用"},
     {"role": "assistant", "content": "登录功能位于..."}
@@ -66,6 +67,7 @@ Content-Type: `application/json`
 | `enable_query_understand` | bool | 否 | `true` | 是否启用 LLM 查询理解。启用后执行查询改写和意图分类；满足知识图谱条件时还会执行独立的实体提取。注意：当服务端全局 `enable_rewrite` 配置为 `false` 时，即便此字段为 `true`，查询理解阶段也会跳过（与 `/knowledge-chat-stateless` 行为一致） |
 | `enable_query_expansion` | bool | 否 | `true` | 是否启用本地查询扩展（低召回时触发，无 LLM 调用） |
 | `chat_model_id` | string | 否 | Tenant 默认模型 | 查询理解使用的 KnowledgeQA 模型。接受模型 ID 或当前 Tenant 可访问模型中的唯一名称；不传时使用 Tenant 唯一的默认 KnowledgeQA 模型。`enable_query_understand=false` 时忽略此字段 |
+| `rerank_model_id` | string | 否 | Tenant 默认 rerank 模型 | 检索重排序使用的 Rerank 模型。接受模型 ID 或当前 Tenant 可访问 Rerank 模型中的唯一名称；不传时使用 Tenant RetrievalConfig 中的 `rerank_model_id`，再回退到自动探测第一个可用 Rerank 模型 |
 | `history` | HistoryMessage[] | 否 | `[]` | 对话历史，用于查询改写的多轮上下文消解 |
 
 > 必须至少指定一个知识库 ID、一个 Knowledge ID，或一个包含有效 `id` 和 `kb_id` 的 Tag mention。裸 `tag_ids` 不能在没有任何 KB 或 Knowledge 范围时单独构成检索范围。
@@ -313,7 +315,7 @@ Content-Type: `application/json`
 | `relation_chunk` | 关联 Chunk 匹配（知识图谱） |
 | `graph` | 知识图谱直接匹配 |
 | `web_search` | 网络搜索结果 |
-| `direct_load` | 直接加载匹配 |
+| `direct_load` | 直接加载匹配（本端点不使用此类型；所有结果均经 hybrid 检索 + rerank 产出） |
 | `data_analysis` | 数据分析匹配 |
 | `unknown` | 无法识别的内部匹配类型 |
 
@@ -359,7 +361,7 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK → CHUNK_MERGE →
 
 并行执行两路检索，结果合并去重：
 
-**① Chunk Search**：使用 `rewrite_query` 做**向量 + 关键词**混合检索。检索参数（`vector_threshold`、`keyword_threshold`、`embedding_top_k`）来自 Tenant RetrievalConfig。
+**① Chunk Search**：使用 `rewrite_query` 做**向量 + 关键词**混合检索（hybrid vector + keyword search）。所有结果均通过 hybrid 检索产出，不使用直接加载（direct load）。检索参数（`vector_threshold`、`keyword_threshold`、`embedding_top_k`）来自 Tenant RetrievalConfig。
 
 **② Entity Search**：使用独立实体提取调用返回的实体，在知识图谱中查找关联的 chunk。仅在实体非空时执行。内部流程：
 
@@ -386,7 +388,7 @@ Chunk Search 是核心检索阶段。任一目标 KB / Knowledge 的 Chunk Searc
 
 ### 4.5 Rerank（重排序）
 
-使用 rerank 模型对候选集重新打分，并按 Tenant RetrievalConfig 的 `rerank_threshold` 过滤低相关性候选。此阶段产生最终 `score`，但不执行 Top K 选择；Top K 由 Merge 后的 MMR 阶段完成。rerank 模型从 Tenant RetrievalConfig 解析；未配置时自动选择第一个可用的 rerank 模型。没有可用 rerank 模型、模型加载失败或 rerank 调用失败时返回 500；rerank 成功但没有候选通过阈值时返回空结果。
+使用 rerank 模型对候选集重新打分，并按 Tenant RetrievalConfig 的 `rerank_threshold` 过滤低相关性候选。此阶段产生最终 `score`，但不执行 Top K 选择；Top K 由 Merge 后的 MMR 阶段完成。`rerank_model_id` 传入时，模型 ID 精确匹配优先；未匹配 ID 时按模型名称精确匹配（必须恰好匹配一个当前 Tenant 可访问且可用的 Rerank 模型）。未传 `rerank_model_id` 时，rerank 模型从 Tenant RetrievalConfig 解析；未配置时自动选择第一个可用的 rerank 模型。没有可用 rerank 模型、模型加载失败或 rerank 调用失败时返回 500；rerank 成功但没有候选通过阈值时返回空结果。
 
 ### 4.6 Merge（合并）
 
@@ -436,12 +438,12 @@ Merge 完成后，使用 MMR（Maximal Marginal Relevance，最大边际相关�
 
 | 状态码 | `error.code` | 条件 |
 |---:|---:|---|
-| 400 | 1000 | `query` 为空、没有知识库/Knowledge/有效 Tag mention 作为检索范围、仅提供裸 `tag_ids` 而无 KB 或 Knowledge 范围、Tag 所属 KB 不在请求范围内、Tag mention 结构非法或类型不支持、`chat_model_id` 按名称匹配到多个模型、`history` 含非法 role（非 `user`/`assistant`）、`history` 超过 100 条 |
+| 400 | 1000 | `query` 为空、没有知识库/Knowledge/有效 Tag mention 作为检索范围、仅提供裸 `tag_ids` 而无 KB 或 Knowledge 范围、Tag 所属 KB 不在请求范围内、Tag mention 结构非法或类型不支持、`chat_model_id` 或 `rerank_model_id` 按名称匹配到多个模型、`history` 含非法 role（非 `user`/`assistant`）、`history` 超过 100 条 |
 | 401 | 1001 | 缺失、无效或过期的认证凭证，或认证凭证无法解析出有效 Tenant |
 | 403 | 1002 | 身份有效但 Tenant 角色低于 Viewer、API Key 既无 `retrieve` capability 也非 `full_access`，或无权访问指定的 KB / Knowledge / Tag / 模型。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分具体原因 |
 | 413 | 1011 | 请求体超过 10 MB |
 | 429 | 1006 | 超出频率限制（见 [6. 频率限制](#6-频率限制)） |
-| 500 | 1007 | Chunk Search 任一目标执行失败、没有可用 rerank 模型、rerank 模型加载/调用失败、Merge 或 MMR 失败、其他管线内部错误；或 `enable_query_understand=true`、未传 `chat_model_id` 时 Tenant 没有默认 KnowledgeQA 模型或存在多个默认 KnowledgeQA 模型 |
+| 500 | 1007 | Chunk Search 任一目标执行失败、没有可用 rerank 模型、rerank 模型加载/调用失败、Merge 或 MMR 失败、其他管线内部错误；或 `enable_query_understand=true`、未传 `chat_model_id` 时 Tenant 没有默认 KnowledgeQA 模型或存在多个默认 KnowledgeQA 模型；或 `rerank_model_id` 传入但在 Tenant 可访问模型中无法匹配 |
 | 504 | 1009 | 请求超过服务端整体超时时间 |
 
 ### 5.3 管线级降级
