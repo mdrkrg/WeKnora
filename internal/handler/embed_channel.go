@@ -369,9 +369,6 @@ func (h *EmbedChannelHandler) GetEmbedChunk(c *gin.Context) {
 		}
 		return
 	}
-	if chunk.Content != "" {
-		chunk.Content = secutils.SanitizeForDisplay(chunk.Content)
-	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": chunk})
 }
 
