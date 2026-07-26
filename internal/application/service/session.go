@@ -704,7 +704,7 @@ func (s *sessionService) ResolveRerankModel(ctx context.Context, requested strin
 	}
 	rerank := make([]*types.Model, 0)
 	for _, model := range models {
-		if model != nil && model.Type == types.ModelTypeRerank {
+		if model != nil && model.Type == types.ModelTypeRerank && model.Status == types.ModelStatusActive {
 			rerank = append(rerank, model)
 		}
 	}

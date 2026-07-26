@@ -105,16 +105,15 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 		}
 		chatManage.RerankModelID = resolved
 	}
+	if chatManage.RerankModelID == "" && rc != nil && rc.RerankModelID != "" {
+		chatManage.RerankModelID = rc.RerankModelID
+	}
 	if chatManage.RerankModelID == "" {
 		if models, err := s.modelService.ListModels(ctx); err == nil {
-			if rc != nil && rc.RerankModelID != "" {
-				chatManage.RerankModelID = rc.RerankModelID
-			} else {
-				for _, model := range models {
-					if model != nil && model.Type == types.ModelTypeRerank {
-						chatManage.RerankModelID = model.ID
-						break
-					}
+			for _, model := range models {
+				if model != nil && model.Type == types.ModelTypeRerank {
+					chatManage.RerankModelID = model.ID
+					break
 				}
 			}
 		}
