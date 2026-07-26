@@ -242,11 +242,11 @@ Content-Type: `application/json`
 
 ### 3.4.1 ContentSegment
 
-描述 `content` 中一个连续文本段落的来源信息。`content_segments` 数组始终至少包含一个元素；数组中各 segment 的 `text` 按原始顺序连接后等于 `content`。
+描述 `content` 中一个连续文本段落的来源信息。`content_segments` 数组始终至少包含一个元素；对于普通 chunk 和合并结果，数组中各 segment 的 `text` 按原始顺序连接后等于 `content`；对于 parent 展开结果，`segment.text` 为未裁剪原文切片，`content` 为裁剪后的 chat 显示用文本，二者可不同（详见下文）。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `text` | string | 该 segment 在 `content` 中的文本内容。所有 segment 的 `text` 连接后等于完整的 `content` |
+| `text` | string | 该 segment 在分块输入文本中的对应原文切片。对于普通 segment，所有 segment 的 `text` 连接后等于 `content`；对于 parent 展开的 segment，`text` 为未裁剪的 parent 原文切片，`content` 为裁剪后的 chat 显示用文本——两者可不同，详见 [Parent 展开的 segment 语义](#parent-展开的-segment-语义) |
 | `chunk_id` | string | 该 segment 文本在原文中所属的 chunk ID |
 | `knowledge_id` | string | 所属 Knowledge（文件）ID |
 | `source_start` | int | Segment 文本在分块输入文本中的起始 rune 偏移（含）。意义与顶层 `start_at` 一致，但范围仅覆盖该 segment 的文本 |
@@ -281,25 +281,33 @@ Content-Type: `application/json`
 }
 ```
 
-`segment` 内的文本字符全部来源于对应 chunk 的源文本；`content` 不包含仅由合并产生的合成字符（如分隔符、连接符等）。`content` 中每个 rune 恰好属于一个 segment。
+`segment` 内的文本字符全部来源于对应 chunk 的源文本；`content` 不包含仅由合并产生的合成字符（如分隔符、连接符等）。对于非 parent 展开的普通结果，`content` 中每个 rune 恰好属于一个 segment；parent 展开结果的 `segment.text` 为未裁剪原文切片，包含 `content` 之外的文本。
 
-**定位指引**：对于 `content` 中 rune 区间 `[pos, pos+len)` 内的任意子串，若其全部位于某个 segment `s` 的覆盖范围内，则该子串在分块输入文本中的对应 rune 区间为 `[s.source_start + offset, s.source_start + offset + len)`，其中 `offset` 是该子串在 `s.text` 内的起始 rune 偏移（以 0 为起点）。若子串跨越多个 segment 边界，原文范围由所属各 segment 的对应区间拼接表达。
+**定位指引**（适用于非 parent 展开的普通结果）：对于 `content` 中 rune 区间 `[pos, pos+len)` 内的任意子串，若其全部位于某个 segment `s` 的覆盖范围内，则该子串在分块输入文本中的对应 rune 区间为 `[s.source_start + offset, s.source_start + offset + len)`，其中 `offset` 是该子串在 `s.text` 内的起始 rune 偏移（以 0 为起点）。若子串跨越多个 segment 边界，原文范围由所属各 segment 的对应区间拼接表达。parent 展开结果的 `content` 为裁剪后的 chat 显示用文本，其子串无法按此方式计算在未裁剪 `segment.text` 中的偏移——定位方式见下文 [Parent 展开的 segment 语义](#parent-展开的-segment-语义)。
 
 **Overlap 裁切**：当 Merge 阶段处理相邻 chunk 存在源范围重叠时，合并后 `content` 中的重叠文本仅保留一次。`content_segments` 必须满足以下不变式：
 
-- 所有 segment 的 `text` 按顺序连接后等于 `content`，相邻 segment 之间无重叠文本；
+- 对于**非 parent 展开**的普通 segment，所有 segment 的 `text` 按顺序连接后等于 `content`，相邻 segment 之间无重叠文本；对于 parent 展开的 segment，`text` 为未裁剪的 parent 原文切片，`content` 为裁剪后的 chat 显示用文本，二者可不同（详见下文）；
 - 对于每个 segment，`source_end - source_start == runeLen(text)` 恒成立；
 - 若某个 chunk 的全部内容已被前一 chunk 重叠覆盖（即去重后无独占文本），则该 chunk 不产生 segment。
 
-> `content_segments` 是 `content` 文本的无重叠分区，不是参与合并的全部 chunk 的完整列表。被完全重叠覆盖的 chunk 不产生 segment，其语义内容已由覆盖它的 segment 承载。需要检索完整参与 chunk 列表的消费者应读取顶层 `sub_chunk_id` 字段。
+> 对于非 parent 展开的普通结果，`content_segments` 各 segment 构成 `content` 文本的无重叠分区；parent 展开结果的单 segment 的 `text` 为未裁剪原文切片，是 `content` 的超集（含已裁剪的图片等内容），各 segment 不是 `content` 的分区。被完全重叠覆盖的 chunk 不产生 segment，其语义内容已由覆盖它的 segment 承载。需要检索完整参与 chunk 列表的消费者应读取顶层 `sub_chunk_id` 字段。
 
-因此消费者可基于 segment 长度累加计算子串在 `content` 中的准确位置，再获取对应 segment 的 `source_start` / `source_end` 计算原文绝对偏移。整个定位流程是 rune 级确定性的，无需依赖文本匹配或处理多个候选 segment 的二义性。
+**Parent 展开的 segment 语义**：当 parent-child 分块启用且 merge 阶段将子 chunk 展开到父 chunk 上下文时，该结果仅包含一个 segment。此时：
+
+- `segment.text` 为父 chunk 在分块输入文本中的**未裁剪原文切片**（即 `artifact[parent.StartAt:parent.EndAt]`），包含所有原始图片表达式、空行和首尾空白；
+- `result.content`（顶层 `content`）为经图片裁剪和空行压缩后的 **chat 显示用文本**，已剔除子 chunk 匹配范围外的图片、压缩连续空行并裁剪首尾空白；
+- `segment.text` 与 `result.content` **可不同**——前者用于在 artifact 中精确定位，后者用于 chat 和展示；
+- 恒等式 `source_end - source_start == runeLen(segment.text)` 成立（指向 artifact 原文切片）；
+- 消费者应在分块输入文本（artifact）中使用 `segment.source_start` / `segment.source_end` + `segment.text` 做精确切片定位（即 `artifact[source_start:source_end] == segment.text`），不应依赖 `segment.text` 与 `result.content` 相等。
+
+因此对于普通 segment，消费者可基于 segment 长度累加计算子串在 `content` 中的准确位置，再获取对应 segment 的 `source_start` / `source_end` 计算原文绝对偏移。对于 parent 展开的 segment，消费者直接使用 `segment.text` + `source_start` / `source_end` 在 artifact 中做切片定位。整个定位流程是 rune 级确定性的，无需依赖文本匹配或处理多个候选 segment 的二义性。
 
 对于来自单个未经合并的 chunk 的结果，`content_segments` 仍包含一个 segment，其 `source_start` / `source_end` 与顶层的 `start_at` / `end_at` 一致。消费者可以始终使用 `content_segments` 进行定位，无需根据合并状态切换路径。
 
 `chunk_type = "summary"` 或 `"entity"` 等生成型结果的 segment 中 `source_start` / `source_end` 均为 `0`；消费者应将其视为仅快照可用。`source_start` / `source_end` 为 `0`（即 `[0, 0)`）的 segment 的 `text` 必须非空；伪 range 不得用于在分块输入文本中切片。
 
-> `content_segments` 中每个 segment 的 `text` 是 `content` 的真实组成部分。消费者使用 segment 信息定位时，`source_start` / `source_end` 指向的是分块输入文本，不是 `content` 本身。顶层 `start_at` / `end_at` 在存在 content 合并时不能代表 `content` 完整范围，此时应使用 `content_segments`。详见 [8.9 offset 语义](#89-offset-语义)。
+> `content_segments` 中每个 segment 的 `text` 对普通结果为 `content` 的真实组成部分，对 parent 展开结果为分块输入文本的未裁剪原文切片。消费者使用 segment 信息定位时，`source_start` / `source_end` 指向的是分块输入文本，不是 `content` 本身。顶层 `start_at` / `end_at` 在存在 content 合并时不能代表 `content` 完整范围，此时应使用 `content_segments`。详见 [8.9 offset 语义](#89-offset-语义)。
 
 ### 3.5 MatchType
 
@@ -511,3 +519,5 @@ Retry-After header 包含建议重试秒数。
    - 不直接将顶层 `start_at` / `end_at` 作为 `content` 的切片下标使用。
 
    对于来自单个未经合并的 chunk 的结果，`content_segments` 仍包含一个 segment，其 `source_start` / `source_end` 与顶层的 `start_at` / `end_at` 一致。消费者可以始终使用 `content_segments` 进行定位，无需根据合并状态切换路径。
+
+   对于 parent 展开的结果（仅含一个 segment），`segment.text` 为未裁剪的 parent 原文切片，`result.content` 为裁剪后的 chat 显示用文本；消费者使用 `artifact[source_start:source_end]` 切片应与 `segment.text` 精确匹配，而非 `result.content`。
