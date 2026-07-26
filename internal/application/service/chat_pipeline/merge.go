@@ -331,7 +331,7 @@ func (p *PluginMerge) resolveParentChunks(
 			r.StartAt = parent.StartAt
 			r.EndAt = parent.EndAt
 			r.ContentSegments = []types.ContentSegment{{
-				Text:        r.Content,
+				Text:        parent.Content,
 				ChunkID:     parent.ID,
 				KnowledgeID: parent.KnowledgeID,
 				SourceStart: parent.StartAt,
