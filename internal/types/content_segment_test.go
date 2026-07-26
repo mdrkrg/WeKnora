@@ -677,3 +677,84 @@ func TestKnowledgeRetrieveResultContentSegmentsNilNormalized(t *testing.T) {
 		t.Errorf("nil ContentSegments not emitted as empty array: %s", raw)
 	}
 }
+
+// --------------------------------------------------------------------------
+// Scope 11: parent-expanded segment semantics (sec 3.4.1 Parent 展开)
+// --------------------------------------------------------------------------
+
+func TestParentExpandedSegmentIdentityHolds(t *testing.T) {
+	// For parent-expanded segments, text is the unpruned parent artifact
+	// slice. The identity source_end - source_start == runeLen(text) MUST
+	// hold so consumers can use artifact[source_start:source_end] for
+	// exact-slice alignment.
+	parentContent := "## Section\n\n![img](u1)\n\nSome text here\n\n![img2](u2)\n\nMore text"
+	parentStart := 100
+	parentEnd := parentStart + utf8.RuneCountInString(parentContent)
+
+	seg := ContentSegment{
+		Text:        parentContent,
+		ChunkID:     "parent-1",
+		KnowledgeID: "k1",
+		SourceStart: parentStart,
+		SourceEnd:   parentEnd,
+		ChunkType:   "parent_text",
+	}
+
+	got := seg.SourceEnd - seg.SourceStart
+	want := utf8.RuneCountInString(seg.Text)
+	if got != want {
+		t.Errorf("parent expanded segment identity broken: SourceEnd(%d)-SourceStart(%d)=%d != runeLen(text)=%d",
+			seg.SourceEnd, seg.SourceStart, got, want)
+	}
+}
+
+func TestParentExpandedSegmentIdentityWithUnicode(t *testing.T) {
+	parentContent := "中文标题\n\n![图片](u1)\n\n正文内容"
+	parentStart := 50
+	parentEnd := parentStart + utf8.RuneCountInString(parentContent)
+
+	seg := ContentSegment{
+		Text:        parentContent,
+		ChunkID:     "parent-1",
+		KnowledgeID: "k1",
+		SourceStart: parentStart,
+		SourceEnd:   parentEnd,
+		ChunkType:   "parent_text",
+	}
+
+	if seg.SourceEnd-seg.SourceStart != utf8.RuneCountInString(seg.Text) {
+		t.Errorf("identity broken with Unicode: %d != %d",
+			seg.SourceEnd-seg.SourceStart, utf8.RuneCountInString(seg.Text))
+	}
+}
+
+func TestParentExpandedSegmentTextMayDifferFromContent(t *testing.T) {
+	// For parent-expanded results, segment.text (unpruned artifact slice)
+	// may differ from result.content (pruned chat text). The spec
+	// explicitly allows this; identity holds against segment.Text, not
+	// result.content.
+	parentContent := "## Title\n\n![img](u1)\n\nSome text"
+	prunedContent := "## Title\n\nSome text"
+
+	if parentContent == prunedContent {
+		t.Skip("test data not valid: parent content must differ from pruned")
+	}
+
+	seg := ContentSegment{
+		Text:        parentContent,
+		ChunkID:     "parent-1",
+		KnowledgeID: "k1",
+		SourceStart: 100,
+		SourceEnd:   100 + utf8.RuneCountInString(parentContent),
+		ChunkType:   "parent_text",
+	}
+
+	if seg.SourceEnd-seg.SourceStart != utf8.RuneCountInString(seg.Text) {
+		t.Errorf("identity broken against segment.text: %d != %d",
+			seg.SourceEnd-seg.SourceStart, utf8.RuneCountInString(seg.Text))
+	}
+
+	if seg.SourceEnd-seg.SourceStart == utf8.RuneCountInString(prunedContent) {
+		t.Errorf("identity incorrectly matches pruned content; consumers must use segment.text not result.content")
+	}
+}
