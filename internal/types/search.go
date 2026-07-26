@@ -157,9 +157,22 @@ type SearchResult struct {
 // ContentSegment describes a contiguous portion of a merged SearchResult.Content
 // and maps it back to the original source chunk and range.
 //
-// Contract: all segment Text fields concatenated in order equal Content.
-// For each segment, SourceEnd - SourceStart == len([]rune(Text)).
-// A [0,0) source range indicates a generated result with no locatable source.
+// Contracts:
+//
+//  1. For each segment, SourceEnd - SourceStart == len([]rune(Text)).
+//     A [0,0) source range indicates a generated result with no locatable
+//     source.
+//
+//  2. For normal / overlap-merged / neighbour-expanded results, all segment
+//     Text fields concatenated in order equal SearchResult.Content.
+//
+//  3. For parent-expanded results (parent-child chunking), the single
+//     segment's Text is the unpruned parent artifact slice.  SearchResult
+//     .Content remains the pruned chat/display projection and may differ
+//     from Text.  Consumers MUST use Text for exact-slice source mapping
+//     (artifact[SourceStart:SourceEnd] == Text) and NOT assume Text equals
+//     Content.
+//
 // Reference: docs/knowledge-retrieve-spec.md sec 3.4.1
 type ContentSegment struct {
 	Text        string `json:"text"`
