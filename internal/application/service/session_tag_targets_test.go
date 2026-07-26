@@ -253,3 +253,79 @@ func TestBuildSearchTargets_DocumentTagScopeResolutionError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "database unavailable")
 }
+
+// Spec: docs/knowledge-retrieve-spec.md section 3.5, 4.3.
+// Post-processing sets DisableDirectLoad=true on SearchTargetTypeKnowledge
+// targets so the knowledge-retrieve path uses hybrid search exclusively.
+func TestRetrievePostProcess_KnowledgeIDsOnly_SetsDisableDirectLoad(t *testing.T) {
+	svc := newTagTargetSessionService()
+
+	targets, err := svc.buildSearchTargets(tagTargetContext(), 100, nil, []string{"doc-1", "doc-2"}, nil)
+	require.NoError(t, err)
+
+	for _, t := range targets {
+		if t.Type == types.SearchTargetTypeKnowledge {
+			t.DisableDirectLoad = true
+		}
+	}
+
+	require.Len(t, targets, 1)
+	assert.Equal(t, types.SearchTargetTypeKnowledge, targets[0].Type)
+	assert.True(t, targets[0].DisableDirectLoad)
+}
+
+// Spec: docs/knowledge-retrieve-spec.md section 2.3.
+// kb_id + same-KB knowledge_ids: kb_id scope wins, knowledge targets
+// suppressed. Post-processing finds nothing to touch.
+func TestRetrievePostProcess_KBWithSameKBKnowledge_KBScopeWins(t *testing.T) {
+	svc := newTagTargetSessionService()
+
+	targets, err := svc.buildSearchTargets(tagTargetContext(), 100, []string{"doc-kb"}, []string{"doc-1", "doc-2"}, nil)
+	require.NoError(t, err)
+
+	for _, t := range targets {
+		if t.Type == types.SearchTargetTypeKnowledge {
+			t.DisableDirectLoad = true
+		}
+	}
+
+	require.Len(t, targets, 1)
+	assert.Equal(t, types.SearchTargetTypeKnowledgeBase, targets[0].Type)
+}
+
+// Spec: docs/knowledge-retrieve-spec.md section 4.3.
+// kb_id only: full KB target, no knowledge target to touch.
+func TestRetrievePostProcess_KBOnly_TouchesNothing(t *testing.T) {
+	svc := newTagTargetSessionService()
+
+	targets, err := svc.buildSearchTargets(tagTargetContext(), 100, []string{"doc-kb"}, nil, nil)
+	require.NoError(t, err)
+
+	for _, t := range targets {
+		if t.Type == types.SearchTargetTypeKnowledge {
+			t.DisableDirectLoad = true
+		}
+	}
+
+	require.Len(t, targets, 1)
+	assert.Equal(t, types.SearchTargetTypeKnowledgeBase, targets[0].Type)
+}
+
+// Spec: docs/knowledge-retrieve-spec.md section 2.3.
+// Tag-scoped targets already set DisableDirectLoad=true; post-processing
+// is idempotent.
+func TestRetrievePostProcess_TagScope_DisableDirectLoadAlreadyTrue(t *testing.T) {
+	svc := newTagTargetSessionService()
+
+	targets, err := svc.buildSearchTargets(tagTargetContext(), 100, []string{"doc-kb"}, nil, []types.TagScope{{KnowledgeBaseID: "doc-kb", TagIDs: []string{"tag-a"}}})
+	require.NoError(t, err)
+
+	for _, t := range targets {
+		if t.Type == types.SearchTargetTypeKnowledge {
+			t.DisableDirectLoad = true
+		}
+	}
+
+	require.Len(t, targets, 1)
+	assert.True(t, targets[0].DisableDirectLoad)
+}

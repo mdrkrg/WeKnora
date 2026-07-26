@@ -144,3 +144,55 @@ func TestKnowledgeRetrieveErrorEnvelopeContract(t *testing.T) {
 		t.Fatalf("invalid error envelope: %#v", got)
 	}
 }
+
+// Spec: docs/knowledge-retrieve-spec.md section 2.2, 2.3.
+// rerank_model_id is an optional string field for selecting the rerank model.
+// When provided, it survives JSON round-trip.
+func TestKnowledgeRetrieveRequestRerankModelIDJSON(t *testing.T) {
+	raw := `{"query":"test","knowledge_base_id":"kb-1","rerank_model_id":"rerank-uuid"}`
+	var req KnowledgeRetrieveRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.RerankModelID != "rerank-uuid" {
+		t.Errorf("RerankModelID = %q, want rerank-uuid", req.RerankModelID)
+	}
+
+	back, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(back, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out["rerank_model_id"]; got != "rerank-uuid" {
+		t.Errorf("rerank_model_id = %v, want rerank-uuid", got)
+	}
+}
+
+// Spec: docs/knowledge-retrieve-spec.md §2.3.
+// rerank_model_id is optional with omitempty: absent in input means empty
+// string, and empty string is omitted from json output.
+func TestKnowledgeRetrieveRequestRerankModelIDOmitted(t *testing.T) {
+	raw := `{"query":"test","knowledge_base_id":"kb-1"}`
+	var req KnowledgeRetrieveRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.RerankModelID != "" {
+		t.Errorf("RerankModelID = %q, want empty", req.RerankModelID)
+	}
+
+	back, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(back, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["rerank_model_id"]; ok {
+		t.Error("rerank_model_id should be omitted when empty")
+	}
+}
