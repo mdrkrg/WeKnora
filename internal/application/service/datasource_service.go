@@ -860,6 +860,21 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		return fetchErr
 	}
 
+	items, fetchErr = s.rehydrateMissingCanvasItems(ctx, ds, connector, config, items)
+	if fetchErr != nil {
+		logger.Errorf(ctx, "failed to restore missing Canvas items: %v", fetchErr)
+		syncLog.Status = types.SyncLogStatusFailed
+		syncLog.FinishedAt = timePtr(time.Now().UTC())
+		syncLog.ErrorMessage = fmt.Sprintf("Fetch failed: %v", fetchErr)
+		_ = s.syncLogRepo.Update(ctx, syncLog)
+		if !wasPaused {
+			ds.Status = types.DataSourceStatusError
+		}
+		ds.ErrorMessage = syncLog.ErrorMessage
+		_ = s.dsRepo.Update(ctx, ds)
+		return fetchErr
+	}
+
 	// Process fetched items and write to knowledge base
 	var result = &types.SyncResult{
 		Total: len(items),
@@ -1221,6 +1236,77 @@ func (s *DataSourceService) processSyncStreaming(
 	logger.Infof(ctx, "streaming sync completed: ds=%s created=%d updated=%d deleted=%d skipped=%d failed=%d",
 		payload.DataSourceID, result.Created, result.Updated, result.Deleted, result.Skipped, result.Failed)
 	return nil
+}
+
+// rehydrateMissingCanvasItems repairs the case where a user deletes synced
+// knowledge while the Canvas cursor still classifies the source file as
+// unchanged. Only missing skipped files are downloaded again; unchanged files
+// that are still present in the knowledge base keep the incremental fast path.
+func (s *DataSourceService) rehydrateMissingCanvasItems(
+	ctx context.Context,
+	ds *types.DataSource,
+	connector datasource.Connector,
+	config *types.DataSourceConfig,
+	items []types.FetchedItem,
+) ([]types.FetchedItem, error) {
+	if ds.Type != types.ConnectorTypeCanvas || len(items) == 0 {
+		return items, nil
+	}
+
+	repo := s.knowledgeService.GetRepository()
+	missingIDs := make([]string, 0)
+	missingIndexes := make(map[string][]int)
+	for i := range items {
+		item := &items[i]
+		if !item.IsSkipped || item.ExternalID == "" {
+			continue
+		}
+		existing, err := repo.FindByDataSourceExternalID(
+			ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("check skipped Canvas item %s: %w", item.ExternalID, err)
+		}
+		if existing != nil {
+			continue
+		}
+		if _, seen := missingIndexes[item.ExternalID]; !seen {
+			missingIDs = append(missingIDs, item.ExternalID)
+		}
+		missingIndexes[item.ExternalID] = append(missingIndexes[item.ExternalID], i)
+	}
+	if len(missingIDs) == 0 {
+		return items, nil
+	}
+
+	logger.Infof(ctx, "restoring %d Canvas item(s) missing from knowledge base", len(missingIDs))
+	refetched, err := connector.FetchAll(ctx, config, missingIDs)
+	if err != nil {
+		return nil, fmt.Errorf("refetch missing Canvas items: %w", err)
+	}
+	restored := make(map[string]struct{}, len(refetched))
+	for i := range refetched {
+		item := refetched[i]
+		indexes := missingIndexes[item.ExternalID]
+		if len(indexes) == 0 {
+			continue
+		}
+		restored[item.ExternalID] = struct{}{}
+		for _, index := range indexes {
+			// Preserve the configured course/folder ownership from the incremental
+			// inventory; a direct file refetch reports the file itself as source.
+			item.SourceResourceID = items[index].SourceResourceID
+			item.IsSkipped = false
+			items[index] = item
+		}
+	}
+	for _, externalID := range missingIDs {
+		if _, ok := restored[externalID]; !ok {
+			return nil, fmt.Errorf("refetch missing Canvas item %s returned no content", externalID)
+		}
+	}
+
+	return items, nil
 }
 
 func (s *DataSourceService) updateSyncRunResult(

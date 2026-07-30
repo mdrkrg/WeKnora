@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"strings"
 	"testing"
 	"time"
@@ -399,4 +400,164 @@ func TestProcessSync_CountsConnectorReportedSkippedItems(t *testing.T) {
 	assert.Zero(t, updated.ItemsCreated)
 	assert.Zero(t, updated.ItemsUpdated)
 	assert.Zero(t, updated.ItemsFailed)
+}
+
+type canvasMissingItemConnector struct {
+	refetchedResourceIDs []string
+	refetchEmpty         bool
+}
+
+func (*canvasMissingItemConnector) Type() string { return types.ConnectorTypeCanvas }
+func (*canvasMissingItemConnector) Validate(context.Context, *types.DataSourceConfig) error {
+	return nil
+}
+func (*canvasMissingItemConnector) ListResources(context.Context, *types.DataSourceConfig, string) ([]types.Resource, error) {
+	return nil, nil
+}
+func (*canvasMissingItemConnector) ResolveResourceAncestors(context.Context, *types.DataSourceConfig, []string) ([]string, error) {
+	return nil, nil
+}
+func (c *canvasMissingItemConnector) FetchAll(
+	_ context.Context, _ *types.DataSourceConfig, resourceIDs []string,
+) ([]types.FetchedItem, error) {
+	c.refetchedResourceIDs = append([]string(nil), resourceIDs...)
+	if c.refetchEmpty {
+		return nil, nil
+	}
+	return []types.FetchedItem{{
+		ExternalID:       "file:missing",
+		Title:            "missing.pdf",
+		FileName:         "missing.pdf",
+		Content:          []byte("restored"),
+		SourceResourceID: "file:missing",
+	}}, nil
+}
+func (*canvasMissingItemConnector) FetchIncremental(
+	context.Context, *types.DataSourceConfig, *types.SyncCursor,
+) ([]types.FetchedItem, *types.SyncCursor, error) {
+	return []types.FetchedItem{
+		{ExternalID: "file:present", SourceResourceID: "course:1", IsSkipped: true},
+		{ExternalID: "file:missing", SourceResourceID: "course:1", IsSkipped: true},
+	}, nil, nil
+}
+
+type canvasRecoveryKnowledgeRepo struct {
+	interfaces.KnowledgeRepository
+}
+
+func (*canvasRecoveryKnowledgeRepo) FindByDataSourceExternalID(
+	_ context.Context, _ uint64, _, _, externalID string,
+) (*types.Knowledge, error) {
+	if externalID == "file:present" {
+		return &types.Knowledge{ID: "knowledge-present"}, nil
+	}
+	return nil, nil
+}
+
+type canvasRecoveryKnowledgeService struct {
+	interfaces.KnowledgeService
+	repo            interfaces.KnowledgeRepository
+	createdMetadata []map[string]string
+}
+
+func (s *canvasRecoveryKnowledgeService) GetRepository() interfaces.KnowledgeRepository {
+	return s.repo
+}
+
+func (s *canvasRecoveryKnowledgeService) CreateKnowledgeFromFile(
+	_ context.Context,
+	_ string,
+	_ *multipart.FileHeader,
+	metadata map[string]string,
+	_ *bool,
+	_ string,
+	_ []string,
+	_ string,
+	_ *types.KnowledgeProcessOverrides,
+) (*types.Knowledge, error) {
+	s.createdMetadata = append(s.createdMetadata, metadata)
+	return &types.Knowledge{ID: "knowledge-restored"}, nil
+}
+
+func TestProcessSync_RestoresManuallyDeletedCanvasItem(t *testing.T) {
+	configJSON, err := (&types.DataSourceConfig{
+		Type:        types.ConnectorTypeCanvas,
+		ResourceIDs: []string{"course:1"},
+	}).ToJSON()
+	require.NoError(t, err)
+
+	ds := &types.DataSource{
+		ID:              "ds-canvas-recovery",
+		TenantID:        1,
+		KnowledgeBaseID: "kb-1",
+		Name:            "Canvas",
+		Type:            types.ConnectorTypeCanvas,
+		Config:          configJSON,
+		SyncMode:        types.SyncModeIncremental,
+		Status:          types.DataSourceStatusActive,
+	}
+	dsRepo := newKBDeleteDSRepo(ds.KnowledgeBaseID, ds)
+	syncLog := &types.SyncLog{
+		ID:           "log-canvas-recovery",
+		DataSourceID: ds.ID,
+		TenantID:     ds.TenantID,
+		Status:       types.SyncLogStatusRunning,
+		StartedAt:    time.Now().UTC(),
+	}
+	syncLogRepo := &processSyncSyncLogRepo{logs: map[string]*types.SyncLog{syncLog.ID: syncLog}}
+	connector := &canvasMissingItemConnector{}
+	registry := datasource.NewConnectorRegistry()
+	require.NoError(t, registry.Register(connector))
+	knowledgeService := &canvasRecoveryKnowledgeService{repo: &canvasRecoveryKnowledgeRepo{}}
+
+	svc := &DataSourceService{
+		dsRepo:            dsRepo,
+		syncLogRepo:       syncLogRepo,
+		knowledgeService:  knowledgeService,
+		kbService:         &processSyncKBService{kb: &types.KnowledgeBase{ID: ds.KnowledgeBaseID, TenantID: ds.TenantID}},
+		connectorRegistry: registry,
+		tenantRepo:        &processSyncTenantRepo{tenant: &types.Tenant{ID: ds.TenantID}},
+		tagService:        &processSyncTagService{},
+	}
+
+	payload, err := json.Marshal(types.DataSourceSyncPayload{
+		DataSourceID: ds.ID,
+		TenantID:     ds.TenantID,
+		SyncLogID:    syncLog.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.ProcessSync(context.Background(), asynq.NewTask(types.TypeDataSourceSync, payload)))
+
+	updated := syncLogRepo.logs[syncLog.ID]
+	require.NotNil(t, updated)
+	assert.Equal(t, types.SyncLogStatusSuccess, updated.Status)
+	assert.Equal(t, 2, updated.ItemsTotal)
+	assert.Equal(t, 1, updated.ItemsCreated)
+	assert.Equal(t, 1, updated.ItemsSkipped)
+	assert.Zero(t, updated.ItemsUpdated)
+	assert.Zero(t, updated.ItemsFailed)
+	assert.Equal(t, []string{"file:missing"}, connector.refetchedResourceIDs)
+	require.Len(t, knowledgeService.createdMetadata, 1)
+	assert.Equal(t, "file:missing", knowledgeService.createdMetadata[0]["external_id"])
+	assert.Equal(t, "course:1", knowledgeService.createdMetadata[0]["source_resource_id"])
+	assert.Equal(t, ds.ID, knowledgeService.createdMetadata[0]["datasource_id"])
+}
+
+func TestRehydrateMissingCanvasItems_ErrorsWhenRefetchReturnsNoItem(t *testing.T) {
+	connector := &canvasMissingItemConnector{refetchEmpty: true}
+	svc := &DataSourceService{knowledgeService: &canvasRecoveryKnowledgeService{repo: &canvasRecoveryKnowledgeRepo{}}}
+	ds := &types.DataSource{
+		ID: "ds-canvas-recovery", TenantID: 1, KnowledgeBaseID: "kb-1", Type: types.ConnectorTypeCanvas,
+	}
+
+	_, err := svc.rehydrateMissingCanvasItems(
+		context.Background(),
+		ds,
+		connector,
+		&types.DataSourceConfig{Type: types.ConnectorTypeCanvas},
+		[]types.FetchedItem{{ExternalID: "file:missing", IsSkipped: true}},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "file:missing returned no content")
 }
