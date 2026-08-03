@@ -13,6 +13,17 @@ import (
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 )
 
+// isEmailInFallbackDomain reports whether email belongs to the OIDC
+// email-fallback domain.
+//
+// TODO: (stub) When the fallback mode is active, invitation registration
+// must reject emails under the fallback domain (synthesized <sub>@domain>
+// addresses are guessable; a third party could pre-register them via an
+// invite link).
+func isEmailInFallbackDomain(email, domain string) bool {
+	return false
+}
+
 // registerByInviteRequest is the body for /auth/register-by-invite.
 //
 // Email is collected from the invitee themselves: share-link rows have

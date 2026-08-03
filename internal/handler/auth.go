@@ -74,6 +74,15 @@ func NewAuthHandler(configInfo *config.Config,
 	}
 }
 
+// oidcEmailFallbackEnabled reports whether the OIDC email-fallback mode
+// is active (OIDC enabled and a fallback domain configured).
+//
+// TODO: (stub) When active it must force registration_mode=invite_only
+// and restrict invite-link registration to emails outside the fallback domain.
+func (h *AuthHandler) oidcEmailFallbackEnabled() bool {
+	return false
+}
+
 // resolveRegistrationMode returns the currently active registration mode.
 // Priority: DB system_settings > cfg (which already absorbed the legacy
 // DISABLE_REGISTRATION env coerce at startup) > "self_serve" hard default.
