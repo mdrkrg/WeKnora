@@ -543,7 +543,7 @@ OIDC 配置定义位于 `internal/config/config.go`，环境变量示例见 `.en
 | `OIDC_AUTH_SCOPES` | Scope 列表，默认 `openid profile email` |
 | `OIDC_USER_INFO_MAPPING_USER_NAME` | claims 中映射到用户名的字段名 |
 | `OIDC_USER_INFO_MAPPING_EMAIL` | claims 中映射到邮箱的字段名 |
-| `OIDC_AUTH_EMAIL_FALLBACK_DOMAIN` | Provider 不返回 email 时，用 `<sub>@<域名>` 合成占位邮箱的域名。留空则保持“邮箱必填”的默认行为 |
+| `OIDC_AUTH_EMAIL_FALLBACK_DOMAIN` | Provider 不返回 email 时，用 `<sub>@<域名>` 合成占位邮箱的域名。留空则保持“邮箱必填”的默认行为。**安全约束**：启用后强制 `auth.registration_mode=invite_only`（启动校验），且邀请链接注册拒绝使用该域名邮箱 |
 
 ### 12.2 启用时的最小要求
 
@@ -624,6 +624,7 @@ Provider 回调后端 `/auth/oidc/callback`，后端用 `code` 换 token、拉�
 3. **邮箱是本地账号关联主键**。
    - 若 Provider 没返回 email，默认无法完成登录。
    - 可设置 `OIDC_AUTH_EMAIL_FALLBACK_DOMAIN`，用 `<sub>@<域名>` 合成占位邮箱（适用于不返回邮箱的 Provider）。
+   - **安全约束**：合成邮箱未经 Provider 验证、可被预注册猜测，因此启用 fallback 会强制 `auth.registration_mode=invite_only`（开放注册自启动校验即被禁止），并拒绝邀请链接注册使用该域名邮箱，防止他人预注册合成邮箱对应的账号后骗取 OIDC 登录关联。
 4. **首次 OIDC 登录会自动创建用户和默认空间**。
 5. **真正用于访问 WeKnora API 的仍是本地 JWT**，不是 OIDC access token。
 6. 当前实现对 `state` 做了编码封装，但 **没有服务端持久化 state/nonce 校验**；它主要用于传递上下文和基本防错，而不是完整的防重放机制。
