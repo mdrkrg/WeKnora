@@ -628,6 +628,10 @@ func ValidateConfig(cfg *Config) error {
 			(strings.TrimSpace(cfg.OIDCAuth.AuthorizationEndpoint) == "" || strings.TrimSpace(cfg.OIDCAuth.TokenEndpoint) == "") {
 			errs = append(errs, "oidc_auth.discovery_url or both oidc_auth.authorization_endpoint and oidc_auth.token_endpoint are required when OIDC is enabled")
 		}
+		if strings.TrimSpace(cfg.OIDCAuth.EmailFallbackDomain) != "" &&
+			(cfg.Auth == nil || strings.TrimSpace(cfg.Auth.RegistrationMode) != AuthRegistrationModeInviteOnly) {
+			errs = append(errs, "oidc_auth.email_fallback_domain requires auth.registration_mode=invite_only (synthesized emails are not provider-verified; open registration would allow account pre-registration)")
+		}
 	}
 
 	if cfg.Auth != nil {

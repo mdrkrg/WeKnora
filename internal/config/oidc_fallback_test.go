@@ -11,10 +11,10 @@ import (
 func oidcFallbackConfig(mode string) *Config {
 	cfg := &Config{
 		OIDCAuth: &OIDCAuthConfig{
-			Enable:             true,
-			ClientID:           "client-id",
-			ClientSecret:       "client-secret",
-			DiscoveryURL:       "https://issuer.example/.well-known/openid-configuration",
+			Enable:              true,
+			ClientID:            "client-id",
+			ClientSecret:        "client-secret",
+			DiscoveryURL:        "https://issuer.example/.well-known/openid-configuration",
 			EmailFallbackDomain: "sjtu.edu.cn",
 		},
 	}

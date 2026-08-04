@@ -14,14 +14,16 @@ import (
 )
 
 // isEmailInFallbackDomain reports whether email belongs to the OIDC
-// email-fallback domain.
-//
-// TODO: (stub) When the fallback mode is active, invitation registration
-// must reject emails under the fallback domain (synthesized <sub>@domain>
-// addresses are guessable; a third party could pre-register them via an
-// invite link).
+// email-fallback domain: it ends with "@domain" exactly (case-
+// insensitive, whitespace-trimmed). Subdomains are NOT included because
+// synthesized addresses are always "<sub>@domain" with no subdomain.
 func isEmailInFallbackDomain(email, domain string) bool {
-	return false
+	email = strings.TrimSpace(strings.ToLower(email))
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if email == "" || domain == "" {
+		return false
+	}
+	return strings.HasSuffix(email, "@"+domain)
 }
 
 // registerByInviteRequest is the body for /auth/register-by-invite.
@@ -155,6 +157,18 @@ func (h *AuthHandler) RegisterByInvite(c *gin.Context) {
 	// must never be logged, so they don't need that defence here.
 	if req.Token == "" || req.Email == "" || req.Username == "" || req.Password == "" {
 		c.Error(apperrors.NewValidationError("token, email, username and password are required"))
+		return
+	}
+
+	// OIDC email-fallback mode: synthesized <sub>@domain> addresses are
+	// guessable, so a third party holding an invite link could pre-register
+	// a victim's future OIDC email and hijack the login that links to it.
+	// Reject registration under the fallback domain; external-domain emails
+	// cannot collide with any synthesized address and stay allowed.
+	if h.oidcEmailFallbackEnabled() &&
+		isEmailInFallbackDomain(req.Email, h.configInfo.OIDCAuth.EmailFallbackDomain) {
+		c.Error(apperrors.NewForbiddenError(
+			"registration with an email in the OIDC fallback domain is not allowed; log in via OIDC instead"))
 		return
 	}
 

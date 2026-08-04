@@ -76,11 +76,10 @@ func NewAuthHandler(configInfo *config.Config,
 
 // oidcEmailFallbackEnabled reports whether the OIDC email-fallback mode
 // is active (OIDC enabled and a fallback domain configured).
-//
-// TODO: (stub) When active it must force registration_mode=invite_only
-// and restrict invite-link registration to emails outside the fallback domain.
 func (h *AuthHandler) oidcEmailFallbackEnabled() bool {
-	return false
+	return h.configInfo != nil && h.configInfo.OIDCAuth != nil &&
+		h.configInfo.OIDCAuth.Enable &&
+		strings.TrimSpace(h.configInfo.OIDCAuth.EmailFallbackDomain) != ""
 }
 
 // resolveRegistrationMode returns the currently active registration mode.
@@ -89,7 +88,16 @@ func (h *AuthHandler) oidcEmailFallbackEnabled() bool {
 //
 // Centralised here so /auth/register and /auth/config stay in lock-step —
 // otherwise a SystemAdmin's UI edit could affect one path and not the other.
+//
+// When the OIDC email-fallback mode is active, registration_mode is
+// FORCED to invite_only regardless of cfg or DB settings: synthesized
+// emails are not provider-verified and open registration would let a
+// third party pre-register a victim's synthesized address, hijacking the
+// OIDC login that later links to it.
 func (h *AuthHandler) resolveRegistrationMode(ctx context.Context) string {
+	if h.oidcEmailFallbackEnabled() {
+		return config.AuthRegistrationModeInviteOnly
+	}
 	// cfg-derived default: empty is impossible after applyAuthAndTenantDefaults,
 	// but be defensive in case AuthHandler was constructed before that ran
 	// (the NewAuthHandler guard already logged in that case).
