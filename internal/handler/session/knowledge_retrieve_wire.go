@@ -15,7 +15,7 @@ type KnowledgeRetrieveWireRequest struct {
 	KnowledgeBaseIDs      []string               `json:"knowledge_base_ids"`     // Multi-KB search
 	KnowledgeIDs          []string               `json:"knowledge_ids"`          // Specific knowledge (file) IDs
 	TagIDs                []string               `json:"tag_ids"`                // KB-local tag filter
-	MentionedItems        []types.MentionedItem  `json:"mentioned_items"`        // Scoped tag mentions (type="tag" only)
+	MentionedItems        []MentionedItemRequest `json:"mentioned_items"`        // Scoped tag mentions (type="tag" only)
 	EnableQueryUnderstand *bool                  `json:"enable_query_understand"` // Query-understand toggle (nil = true)
 	EnableQueryExpansion  *bool                  `json:"enable_query_expansion"`  // Query-expansion toggle (nil = true)
 	ChatModelID           string                 `json:"chat_model_id"`           // Query-understand model override
@@ -25,7 +25,9 @@ type KnowledgeRetrieveWireRequest struct {
 
 // toServiceRequest converts the Wire DTO into the service-layer request
 // contract (types.KnowledgeRetrieveRequest, which embeds QARequest).
-func (w KnowledgeRetrieveWireRequest) toServiceRequest() types.KnowledgeRetrieveRequest {
+// Tag resolution happens in the handler (ValidateKnowledgeRetrieveRequest +
+// mergeTagScopesFromRequestIDs) and flows in via TagScopes.
+func (w KnowledgeRetrieveWireRequest) toServiceRequest(tagScopes []types.TagScope) types.KnowledgeRetrieveRequest {
 	return types.KnowledgeRetrieveRequest{
 		QARequest: types.QARequest{
 			Query:           w.Query,
@@ -34,8 +36,7 @@ func (w KnowledgeRetrieveWireRequest) toServiceRequest() types.KnowledgeRetrieve
 			RerankModelID:    w.RerankModelID,
 		},
 		KnowledgeBaseID:       w.KnowledgeBaseID,
-		TagIDs:                w.TagIDs,
-		MentionedItems:        w.MentionedItems,
+		TagScopes:             tagScopes,
 		EnableQueryUnderstand: w.EnableQueryUnderstand,
 		EnableQueryExpansion:  w.EnableQueryExpansion,
 		ChatModelID:           w.ChatModelID,

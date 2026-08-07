@@ -2,7 +2,6 @@ package session
 
 import (
 	"encoding/json"
-	"net/http"
 	"testing"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -19,7 +18,7 @@ func TestValidateKnowledgeRetrieveRequestScopeRules(t *testing.T) {
 		{name: "requires a search scope", req: KnowledgeRetrieveWireRequest{Query: "q"}, want: false},
 		{name: "bare tags are not a scope", req: KnowledgeRetrieveWireRequest{Query: "q", TagIDs: []string{"tag-1"}}, want: false},
 		{name: "knowledge id supplies scope", req: KnowledgeRetrieveWireRequest{Query: "q", KnowledgeIDs: []string{"file-1"}}, want: true},
-		{name: "scoped tag supplies scope", req: KnowledgeRetrieveWireRequest{Query: "q", MentionedItems: []types.MentionedItem{{ID: "tag-1", Type: "tag", KBID: "kb-1"}}}, want: true},
+		{name: "scoped tag supplies scope", req: KnowledgeRetrieveWireRequest{Query: "q", MentionedItems: []MentionedItemRequest{{ID: "tag-1", Type: "tag", KBID: "kb-1"}}}, want: true},
 		{name: "kb supplies scope", req: KnowledgeRetrieveWireRequest{Query: "q", KnowledgeBaseID: "kb-1"}, want: true},
 	}
 	for _, tt := range tests {
@@ -35,9 +34,9 @@ func TestValidateKnowledgeRetrieveRequestScopeRules(t *testing.T) {
 // Reference: docs/knowledge-retrieve-spec.md sections 2.3-2.5.
 func TestValidateKnowledgeRetrieveRequestRejectsInvalidMentionsAndTags(t *testing.T) {
 	tests := []KnowledgeRetrieveWireRequest{
-		{Query: "q", KnowledgeBaseID: "kb-1", MentionedItems: []types.MentionedItem{{ID: "tag-1", Type: "file", KBID: "kb-1"}}},
-		{Query: "q", KnowledgeBaseID: "kb-1", MentionedItems: []types.MentionedItem{{ID: "tag-1", Type: "tag"}}},
-		{Query: "q", KnowledgeBaseID: "kb-1", MentionedItems: []types.MentionedItem{{ID: "", Type: "tag", KBID: "kb-1"}}},
+		{Query: "q", KnowledgeBaseID: "kb-1", MentionedItems: []MentionedItemRequest{{ID: "tag-1", Type: "file", KBID: "kb-1"}}},
+		{Query: "q", KnowledgeBaseID: "kb-1", MentionedItems: []MentionedItemRequest{{ID: "tag-1", Type: "tag"}}},
+		{Query: "q", KnowledgeBaseID: "kb-1", MentionedItems: []MentionedItemRequest{{ID: "", Type: "tag", KBID: "kb-1"}}},
 	}
 	for i, req := range tests {
 		if err := ValidateKnowledgeRetrieveRequest(req); err == nil {
@@ -102,30 +101,6 @@ func TestKnowledgeRetrieveResponseHasStableEmptyValues(t *testing.T) {
 	}
 }
 
-// Reference: docs/knowledge-retrieve-spec.md section 3.5.
-func TestKnowledgeRetrieveMatchTypeMapping(t *testing.T) {
-	for _, tt := range []struct {
-		in  types.MatchType
-		out string
-	}{
-		{types.MatchTypeEmbedding, "vector"},
-		{types.MatchTypeKeywords, "keyword"},
-		{types.MatchTypeNearByChunk, "nearby_chunk"},
-		{types.MatchTypeHistory, "history"},
-		{types.MatchTypeParentChunk, "parent_chunk"},
-		{types.MatchTypeRelationChunk, "relation_chunk"},
-		{types.MatchTypeGraph, "graph"},
-		{types.MatchTypeWebSearch, "web_search"},
-		{types.MatchTypeDirectLoad, "direct_load"},
-		{types.MatchTypeDataAnalysis, "data_analysis"},
-		{types.MatchType(9999), "unknown"},
-	} {
-		if got := KnowledgeRetrieveMatchType(tt.in); got != tt.out {
-			t.Errorf("match type %v = %q, want %q", tt.in, got, tt.out)
-		}
-	}
-}
-
 // Reference: docs/knowledge-retrieve-spec.md sections 3.3 and 4.3.
 func TestKnowledgeRetrieveNoRetrievalIntentReturnsEmptyResults(t *testing.T) {
 	for _, intent := range []types.QueryIntent{types.IntentChitchat, types.IntentGreeting, types.IntentFollowUp, types.IntentWebSearch, types.IntentImageOnly, types.IntentDocOnly} {
@@ -135,13 +110,52 @@ func TestKnowledgeRetrieveNoRetrievalIntentReturnsEmptyResults(t *testing.T) {
 	}
 }
 
-// Reference: docs/knowledge-retrieve-spec.md sections 5.1-5.2.
-func TestKnowledgeRetrieveErrorEnvelopeContract(t *testing.T) {
-	if http.StatusRequestEntityTooLarge != 413 || http.StatusTooManyRequests != 429 || http.StatusGatewayTimeout != 504 {
-		t.Fatal("HTTP status constants changed unexpectedly")
+// Reference: docs/knowledge-retrieve-spec.md sections 2.3-2.5.
+// Bare tag_ids are rejected across multiple KBs (400); they are only merged
+// into a single-KB scope.
+func TestBuildRetrieveTagScopesRejectsMultiKBBareTags(t *testing.T) {
+	wire := KnowledgeRetrieveWireRequest{
+		Query:           "q",
+		KnowledgeBaseID: "kb-1",
+		TagIDs:          []string{"tag-1"},
 	}
-	if got := KnowledgeRetrieveErrorEnvelope(1000, "query cannot be empty"); got.Success || got.Error.Code != 1000 || got.Error.Message != "query cannot be empty" || got.Error.Details != nil || got.Data != nil {
-		t.Fatalf("invalid error envelope: %#v", got)
+	_, err := buildRetrieveTagScopes(wire, []string{"kb-1"})
+	if err != nil {
+		t.Fatalf("single-KB bare tag must be accepted: %v", err)
+	}
+
+	wireMulti := KnowledgeRetrieveWireRequest{
+		Query:            "q",
+		KnowledgeBaseIDs: []string{"kb-1", "kb-2"},
+		TagIDs:           []string{"tag-1"},
+	}
+	if _, err := buildRetrieveTagScopes(wireMulti, []string{"kb-1", "kb-2"}); err == nil {
+		t.Fatal("bare tag across multiple KBs must be rejected")
+	}
+}
+
+// Reference: docs/knowledge-retrieve-spec.md section 2.3.
+// Scoped tag mentions resolve to per-KB scopes.
+func TestBuildRetrieveTagScopesFromMentions(t *testing.T) {
+	wire := KnowledgeRetrieveWireRequest{
+		Query:           "q",
+		KnowledgeBaseID: "kb-1",
+		MentionedItems: []MentionedItemRequest{
+			{ID: "tag-1", Type: "tag", KBID: "kb-1"},
+			{ID: "tag-2", Type: "tag", KBID: "kb-2"},
+		},
+	}
+	scopes, err := buildRetrieveTagScopes(wire, []string{"kb-1"})
+	if err != nil {
+		t.Fatalf("buildRetrieveTagScopes: %v", err)
+	}
+	if len(scopes) == 0 {
+		t.Fatal("expected at least one tag scope from mentions")
+	}
+	for _, scope := range scopes {
+		if scope.KnowledgeBaseID == "" || len(scope.TagIDs) == 0 {
+			t.Errorf("invalid scope: %#v", scope)
+		}
 	}
 }
 
@@ -157,7 +171,7 @@ func TestKnowledgeRetrieveRequestRerankModelIDJSON(t *testing.T) {
 	if wire.RerankModelID != "rerank-uuid" {
 		t.Errorf("RerankModelID = %q, want rerank-uuid", wire.RerankModelID)
 	}
-	svcReq := wire.toServiceRequest()
+	svcReq := wire.toServiceRequest(nil)
 	if svcReq.RerankModelID != "rerank-uuid" {
 		t.Errorf("service RerankModelID = %q, want rerank-uuid", svcReq.RerankModelID)
 	}
@@ -197,14 +211,12 @@ func TestKnowledgeRetrieveWireToServiceRequest(t *testing.T) {
 		KnowledgeBaseID:       "kb-1",
 		KnowledgeBaseIDs:      []string{"kb-2"},
 		KnowledgeIDs:          []string{"file-1"},
-		TagIDs:                []string{"tag-1"},
-		MentionedItems:        []types.MentionedItem{{ID: "tag-1", Type: "tag", KBID: "kb-1"}},
 		EnableQueryUnderstand: &enabled,
 		ChatModelID:           "model-1",
 		RerankModelID:         "rerank-1",
 		History:               []types.HistoryMessage{{Role: "user", Content: "hello"}},
 	}
-	svc := wire.toServiceRequest()
+	svc := wire.toServiceRequest([]types.TagScope{{KnowledgeBaseID: "kb-1", TagIDs: []string{"tag-1"}}})
 	if svc.Query != "how to login" {
 		t.Errorf("Query = %q", svc.Query)
 	}
@@ -217,11 +229,8 @@ func TestKnowledgeRetrieveWireToServiceRequest(t *testing.T) {
 	if len(svc.KnowledgeIDs) != 1 || svc.KnowledgeIDs[0] != "file-1" {
 		t.Errorf("KnowledgeIDs = %v", svc.KnowledgeIDs)
 	}
-	if len(svc.TagIDs) != 1 || svc.TagIDs[0] != "tag-1" {
-		t.Errorf("TagIDs = %v", svc.TagIDs)
-	}
-	if len(svc.MentionedItems) != 1 || svc.MentionedItems[0].ID != "tag-1" {
-		t.Errorf("MentionedItems = %v", svc.MentionedItems)
+	if len(svc.TagScopes) != 1 || len(svc.TagScopes[0].TagIDs) != 1 || svc.TagScopes[0].TagIDs[0] != "tag-1" {
+		t.Errorf("TagScopes = %v", svc.TagScopes)
 	}
 	if svc.EnableQueryUnderstand == nil || *svc.EnableQueryUnderstand {
 		t.Errorf("EnableQueryUnderstand = %v, want false", svc.EnableQueryUnderstand)

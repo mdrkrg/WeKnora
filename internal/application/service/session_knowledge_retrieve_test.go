@@ -469,6 +469,32 @@ func TestRetrieveKnowledgeRerankResolution(t *testing.T) {
 		"no rerank model available -> skip rerank (spec sec. 4.5/sec. 5.3)")
 }
 
+// reference: docs/knowledge-retrieve-spec.md section 3.5.
+// The production match-type mapping converts internal MatchType to the
+// documented string labels; unknown values map to "unknown".
+func TestRetrieveMatchTypeMapping(t *testing.T) {
+	for _, tt := range []struct {
+		in  types.MatchType
+		out string
+	}{
+		{types.MatchTypeEmbedding, "vector"},
+		{types.MatchTypeKeywords, "keyword"},
+		{types.MatchTypeNearByChunk, "nearby_chunk"},
+		{types.MatchTypeHistory, "history"},
+		{types.MatchTypeParentChunk, "parent_chunk"},
+		{types.MatchTypeRelationChunk, "relation_chunk"},
+		{types.MatchTypeGraph, "graph"},
+		{types.MatchTypeWebSearch, "web_search"},
+		{types.MatchTypeDirectLoad, "direct_load"},
+		{types.MatchTypeDataAnalysis, "data_analysis"},
+		{types.MatchType(9999), "unknown"},
+	} {
+		if got := retrieveMatchType(tt.in); got != tt.out {
+			t.Errorf("match type %v = %q, want %q", tt.in, got, tt.out)
+		}
+	}
+}
+
 func eventNames(events []types.EventType) []string {
 	out := make([]string, len(events))
 	for i, e := range events {

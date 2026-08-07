@@ -21,27 +21,9 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 	}
 	kbIDs = uniqueRetrieveStrings(kbIDs)
 
-	tagIDsByKB := make(map[string][]string)
-	for _, item := range req.MentionedItems {
-		if item.Type != "tag" {
-			continue
-		}
-		if !containsRetrieveString(kbIDs, item.KBID) {
-			kbIDs = append(kbIDs, item.KBID)
-		}
-		tagIDsByKB[item.KBID] = appendUniqueRetrieve(tagIDsByKB[item.KBID], item.ID)
-	}
-	if len(req.TagIDs) > 0 {
-		for _, kbID := range kbIDs {
-			tagIDsByKB[kbID] = appendUniqueRetrieve(tagIDsByKB[kbID], req.TagIDs...)
-		}
-	}
-	tagScopes := make([]types.TagScope, 0, len(tagIDsByKB))
-	for kbID, tagIDs := range tagIDsByKB {
-		if kbID != "" && len(tagIDs) > 0 {
-			tagScopes = append(tagScopes, types.TagScope{KnowledgeBaseID: kbID, TagIDs: tagIDs})
-		}
-	}
+	// Tag scopes are resolved by the handler (tag_ids + mentioned_items,
+	// mirroring /knowledge-search); buildSearchTargets incorporates their
+	// KBs and tag filters.
 
 	// Get tenant
 	tenantID, ok := types.TenantIDFromContext(ctx)
@@ -50,7 +32,7 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 	}
 
 	// Build search targets
-	searchTargets, err := s.buildSearchTargets(ctx, tenantID, kbIDs, req.KnowledgeIDs, tagScopes)
+	searchTargets, err := s.buildSearchTargets(ctx, tenantID, kbIDs, req.KnowledgeIDs, req.TagScopes)
 	if err != nil {
 		return nil, err
 	}
@@ -220,11 +202,30 @@ func projectRetrieveResult(result *types.SearchResult) *types.KnowledgeRetrieveR
 }
 
 func retrieveMatchType(mt types.MatchType) string {
-	labels := []string{"vector", "keyword", "nearby_chunk", "history", "parent_chunk", "relation_chunk", "graph", "web_search", "direct_load", "data_analysis"}
-	if int(mt) >= 0 && int(mt) < len(labels) {
-		return labels[mt]
+	switch mt {
+	case types.MatchTypeEmbedding:
+		return "vector"
+	case types.MatchTypeKeywords:
+		return "keyword"
+	case types.MatchTypeNearByChunk:
+		return "nearby_chunk"
+	case types.MatchTypeHistory:
+		return "history"
+	case types.MatchTypeParentChunk:
+		return "parent_chunk"
+	case types.MatchTypeRelationChunk:
+		return "relation_chunk"
+	case types.MatchTypeGraph:
+		return "graph"
+	case types.MatchTypeWebSearch:
+		return "web_search"
+	case types.MatchTypeDirectLoad:
+		return "direct_load"
+	case types.MatchTypeDataAnalysis:
+		return "data_analysis"
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }
 
 // isKnownRetrieveIntent reports whether intent is one of the nine documented
@@ -257,13 +258,4 @@ func containsRetrieveString(values []string, value string) bool {
 		}
 	}
 	return false
-}
-
-func appendUniqueRetrieve(values []string, additions ...string) []string {
-	for _, addition := range additions {
-		if addition != "" && !containsRetrieveString(values, addition) {
-			values = append(values, addition)
-		}
-	}
-	return values
 }

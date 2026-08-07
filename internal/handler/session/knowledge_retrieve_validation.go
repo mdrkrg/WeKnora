@@ -12,8 +12,9 @@ import (
 const MaxKnowledgeRetrieveHistory = 100
 
 // ValidateKnowledgeRetrieveRequest validates the structural portion of the
-// retrieve wire request. Resource ownership is checked while building search
-// targets (in the service layer).
+// retrieve wire request: query, history, mention shape, and scope existence.
+// Resource ownership is checked while building search targets (service layer);
+// tag-to-KB resolution is done by buildRetrieveTagScopes.
 func ValidateKnowledgeRetrieveRequest(r KnowledgeRetrieveWireRequest) error {
 	if strings.TrimSpace(r.Query) == "" {
 		return fmt.Errorf("query cannot be empty")
@@ -46,41 +47,19 @@ func ValidateKnowledgeRetrieveRequest(r KnowledgeRetrieveWireRequest) error {
 	return nil
 }
 
-// KnowledgeRetrieveMatchType converts internal match types at the response
-// boundary.
-func KnowledgeRetrieveMatchType(mt types.MatchType) string {
-	switch mt {
-	case types.MatchTypeEmbedding:
-		return "vector"
-	case types.MatchTypeKeywords:
-		return "keyword"
-	case types.MatchTypeNearByChunk:
-		return "nearby_chunk"
-	case types.MatchTypeHistory:
-		return "history"
-	case types.MatchTypeParentChunk:
-		return "parent_chunk"
-	case types.MatchTypeRelationChunk:
-		return "relation_chunk"
-	case types.MatchTypeGraph:
-		return "graph"
-	case types.MatchTypeWebSearch:
-		return "web_search"
-	case types.MatchTypeDirectLoad:
-		return "direct_load"
-	case types.MatchTypeDataAnalysis:
-		return "data_analysis"
-	default:
-		return "unknown"
+// buildRetrieveTagScopes resolves the effective KB-local tag scopes from
+// mentioned_items (scoped tags) plus bare tag_ids, mirroring the
+// /knowledge-search handler. It applies the same rules:
+//   - mentioned_items contribute scoped tags bound to their KB
+//   - bare tag_ids are only allowed with exactly one KB in scope
+//     (otherwise 400), and are merged into that KB's scope
+func buildRetrieveTagScopes(r KnowledgeRetrieveWireRequest, kbIDs []string) ([]types.TagScope, error) {
+	mentionScopes := tagScopesFromMentionedItems(r.MentionedItems)
+	requestTagIDs := dedupRequestStrings(r.TagIDs)
+	if err := validateUnscopedTagIDs(orphanTagIDsForScope(requestTagIDs, mentionScopes), kbIDs); err != nil {
+		return nil, err
 	}
-}
-
-// KnowledgeRetrieveErrorEnvelope builds a standardized error response body.
-func KnowledgeRetrieveErrorEnvelope(code int, message string) types.KnowledgeRetrieveResponse {
-	return types.KnowledgeRetrieveResponse{
-		Success: false,
-		Error:   &types.KnowledgeRetrieveError{Code: code, Message: message, Details: nil},
-	}
+	return mergeTagScopesFromRequestIDs(mentionScopes, requestTagIDs, kbIDs), nil
 }
 
 func nonEmpty(values []string) []string {

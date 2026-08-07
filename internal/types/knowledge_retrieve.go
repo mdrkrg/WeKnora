@@ -15,10 +15,9 @@ type KnowledgeRetrieveRequest struct {
 	// KnowledgeBaseID is a single-KB shorthand (backward compatible); merged
 	// with KnowledgeBaseIDs by the handler/service.
 	KnowledgeBaseID string `json:"knowledge_base_id,omitempty"`
-	// TagIDs filters retrieval to KB-local tags; resolved to per-KB scopes.
-	TagIDs []string `json:"tag_ids,omitempty"`
-	// MentionedItems carries scoped tag mentions (type="tag" only).
-	MentionedItems []MentionedItem `json:"mentioned_items,omitempty"`
+	// TagScopes are the resolved tag-constrained KB scopes (built by the
+	// handler from tag_ids + mentioned_items, mirroring /knowledge-search).
+	TagScopes []TagScope `json:"-"`
 	// EnableQueryUnderstand controls LLM query understanding (rewrite + intent
 	// + optional entity extraction). nil defaults to true.
 	EnableQueryUnderstand *bool `json:"enable_query_understand,omitempty"`

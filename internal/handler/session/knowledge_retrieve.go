@@ -46,13 +46,25 @@ func (h *Handler) KnowledgeRetrieve(c *gin.Context) {
 		return
 	}
 
+	// Resolve tag scopes from mentioned_items + bare tag_ids (mirrors
+	// /knowledge-search); bare tags across multiple KBs return 400.
+	kbIDs := append([]string(nil), wire.KnowledgeBaseIDs...)
+	if strings.TrimSpace(wire.KnowledgeBaseID) != "" {
+		kbIDs = append(kbIDs, wire.KnowledgeBaseID)
+	}
+	tagScopes, err := buildRetrieveTagScopes(wire, kbIDs)
+	if err != nil {
+		c.Error(errors.NewBadRequestError(err.Error()))
+		return
+	}
+
 	service, ok := h.sessionService.(knowledgeRetrieveService)
 	if !ok {
 		c.Error(errors.NewInternalServerError("knowledge retrieve service unavailable"))
 		return
 	}
 
-	request := wire.toServiceRequest()
+	request := wire.toServiceRequest(tagScopes)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
 	defer cancel()
 	data, err := service.RetrieveKnowledge(ctx, &request)
