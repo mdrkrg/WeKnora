@@ -62,7 +62,7 @@ Content-Type: `application/json`
 | `knowledge_base_id` | string | 否 | — | 单个知识库 ID（向后兼容）；与 `knowledge_base_ids` 合并 |
 | `knowledge_base_ids` | string[] | 否 | — | 多个知识库 ID 列表，跨知识库检索 |
 | `knowledge_ids` | string[] | 否 | — | 限定到指定知识（文件）；不传则在整库范围内搜索 |
-| `tag_ids` | string[] | 否 | — | Tag ID 列表。服务端根据每个 Tag ID 的实际所属 KB 分组，并仅在该 KB 的检索范围内过滤；Tag ID 所属 KB 必须位于请求的有效 KB 范围内 |
+| `tag_ids` | string[] | 否 | — | 裸 Tag ID 列表，未指定所属 KB。仅在请求同时指定**恰好一个**显式 `knowledge_base_id` 时并入该 KB 的检索范围；否则返回 400。需要跨 KB 的 Tag 过滤时使用 `mentioned_items` 显式声明 Tag 与 KB 的绑定 |
 | `mentioned_items` | MentionedItem[] | 否 | — | scoped tag mentions。用于显式指定 Tag ID 与所属 KB 的绑定关系 |
 | `enable_query_understand` | bool | 否 | `true` | 是否启用 LLM 查询理解（查询改写 + 意图分类 + 可选实体提取）。受服务端全局 `enable_rewrite` 配置控制，行为见 [4.2 查询理解](#42-query-understanding查询理解) |
 | `enable_query_expansion` | bool | 否 | `true` | 是否启用本地查询扩展（低召回时触发，无 LLM 调用） |
@@ -75,10 +75,10 @@ Content-Type: `application/json`
 检索范围按以下规则组合：
 
 - `knowledge_base_id` 与 `knowledge_base_ids` 合并并去重；不同 KB 的最终范围取并集。
-- `tag_ids` 按 Tag ID 查询实际所属 KB；多个 Tag 使用 OR 语义。同名 Tag 在不同 KB 中具有不同 ID，必须分别传入这些 ID。
+- `tag_ids` 中的 Tag 使用 OR 语义；同名 Tag 在不同 KB 中具有不同 ID，必须分别传入这些 ID。服务端不按 Tag ID 反查所属 KB——裸 Tag 的归属由客户端声明的唯一显式 KB 决定。
 - 请求的有效 KB 范围包括显式指定的 KB，以及由 `knowledge_ids` 和 scoped Tag mention 解析出的 KB。
-- 裸 `tag_ids` 中的每个 Tag 所属 KB 必须位于请求的有效 KB 范围内，否则返回 400。
-- 裸 `tag_ids` 与 `mentioned_items` 中的 Tag ID 合并去重；同一 Tag 若同时出现，`kb_id` 必须与该 Tag 的实际所属 KB 一致。
+- 裸 `tag_ids` 仅在恰好一个显式 `knowledge_base_id` 时合法（并入该 KB 的检索范围）；无显式 KB、多 KB，或仅靠 `knowledge_ids` / `mentioned_items` 推导出的 KB 范围时返回 400——与 `/knowledge-search` 端点行为一致。
+- 裸 `tag_ids` 与 `mentioned_items` 中的 Tag ID 合并去重；同一 Tag 在 `mentioned_items` 中声明的 `kb_id` 即其归属，服务端以其声明为准。
 - `mentioned_items` 仅接受 `type="tag"` 的 item，且 `id`、`kb_id` 均非空并相互匹配，否则返回 400（详见 [2.5 MentionedItem](#25-mentioneditem-结构)）。
 - 同一 KB 同时指定 Knowledge ID 和 Tag 时，取“指定 Knowledge”与“带任一指定 Tag 的 Knowledge”的交集。
 - 如果某 KB 被无 Tag 条件地整库选中，则同一 KB 中重复出现的 `knowledge_ids` 不会缩小整库范围；属于其他 KB 的 `knowledge_ids` 作为其他检索目标加入并集。
