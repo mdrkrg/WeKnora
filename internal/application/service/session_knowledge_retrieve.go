@@ -90,12 +90,24 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 		chatManage.QueryUnderstandModelID = modelID
 		chatManage.EnableRewrite = true
 
-		// Inject request history for multi-turn rewrite
-		for _, message := range req.History {
-			if message.Role == "user" {
-				chatManage.History = append(chatManage.History, &types.History{Query: message.Content})
-			} else {
-				chatManage.History = append(chatManage.History, &types.History{Answer: message.Content})
+		// Inject request history for multi-turn rewrite as complete
+		// query/answer pairs, mirroring loadAndProcessHistory's policy:
+		// unpaired assistant messages and a trailing user message (the
+		// current query itself) are dropped. Cap at the latest MaxRounds
+		// rounds; MaxRounds <= 0 disables multi-turn entirely.
+		if maxRounds := s.cfg.Conversation.MaxRounds; maxRounds > 0 {
+			var pending *types.History
+			for _, message := range req.History {
+				if message.Role == "user" {
+					pending = &types.History{Query: message.Content}
+				} else if pending != nil {
+					pending.Answer = message.Content
+					chatManage.History = append(chatManage.History, pending)
+					pending = nil
+				}
+			}
+			if len(chatManage.History) > maxRounds {
+				chatManage.History = append([]*types.History(nil), chatManage.History[len(chatManage.History)-maxRounds:]...)
 			}
 		}
 

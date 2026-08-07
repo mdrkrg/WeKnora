@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -240,8 +241,71 @@ func TestRetrieveKnowledgeUsesParallelSearch(t *testing.T) {
 		"spec sec. 4.3: CHUNK_SEARCH is replaced by CHUNK_SEARCH_PARALLEL; entity search must be co-located")
 }
 
-// reference: docs/knowledge-retrieve-spec.md sections 4.2 -> 4.3.
-// sec. 4.2 (3): entity extraction stores entities into internal state.
+// reference: docs/knowledge-retrieve-spec.md sec. 4.2.
+// Request history is injected for multi-turn rewrite as complete
+// query/answer pairs: unpaired assistant messages and a trailing user
+// message (the current query) are dropped.
+func TestRetrieveKnowledgeRequestHistoryPairedForRewrite(t *testing.T) {
+	spy := &retrievePipelineSpy{
+		quIntent:  types.IntentKBSearch,
+		quRewrite: "rewritten",
+	}
+	svc := newRetrieveTestService(spy)
+
+	req := &types.KnowledgeRetrieveRequest{
+		QARequest: types.QARequest{Query: "current query", KnowledgeBaseIDs: []string{testKBID}},
+		History: []types.HistoryMessage{
+			{Role: "assistant", Content: "orphan answer"}, // unpaired, dropped
+			{Role: "user", Content: "第一轮问题"},
+			{Role: "assistant", Content: "第一轮回答"},
+			{Role: "user", Content: "第二轮问题"},
+			{Role: "assistant", Content: "第二轮回答"},
+			{Role: "user", Content: "current query"}, // trailing user = current query, dropped
+		},
+	}
+	_, err := svc.RetrieveKnowledge(testContext(), req)
+	require.NoError(t, err)
+
+	cm := spy.chatManageFor(types.QUERY_UNDERSTAND)
+	require.NotNil(t, cm, "QUERY_UNDERSTAND must run and capture the injected history")
+	require.Len(t, cm.History, 2)
+	assert.Equal(t, "第一轮问题", cm.History[0].Query)
+	assert.Equal(t, "第一轮回答", cm.History[0].Answer)
+	assert.Equal(t, "第二轮问题", cm.History[1].Query)
+	assert.Equal(t, "第二轮回答", cm.History[1].Answer)
+}
+
+// History beyond MaxRounds is truncated to the latest rounds, mirroring
+// loadAndProcessHistory's window.
+func TestRetrieveKnowledgeRequestHistoryCappedByMaxRounds(t *testing.T) {
+	spy := &retrievePipelineSpy{
+		quIntent:  types.IntentKBSearch,
+		quRewrite: "rewritten",
+	}
+	svc := newRetrieveTestService(spy) // cfg MaxRounds = 5
+
+	var history []types.HistoryMessage
+	for i := 0; i < 7; i++ {
+		history = append(history,
+			types.HistoryMessage{Role: "user", Content: fmt.Sprintf("q%d", i)},
+			types.HistoryMessage{Role: "assistant", Content: fmt.Sprintf("a%d", i)},
+		)
+	}
+	req := &types.KnowledgeRetrieveRequest{
+		QARequest: types.QARequest{Query: "current query", KnowledgeBaseIDs: []string{testKBID}},
+		History:   history,
+	}
+	_, err := svc.RetrieveKnowledge(testContext(), req)
+	require.NoError(t, err)
+
+	cm := spy.chatManageFor(types.QUERY_UNDERSTAND)
+	require.NotNil(t, cm)
+	require.Len(t, cm.History, 5)
+	assert.Equal(t, "q2", cm.History[0].Query, "only the latest 5 rounds survive")
+	assert.Equal(t, "a6", cm.History[4].Answer)
+}
+
+// reference: docs/knowledge-retrieve-spec.md sec. 4.3.
 // sec. 4.3 (2): Entity Search uses entities from the separate entity extraction call.
 func TestRetrieveKnowledgeEntityFlowsToParallelSearch(t *testing.T) {
 	spy := &retrievePipelineSpy{
