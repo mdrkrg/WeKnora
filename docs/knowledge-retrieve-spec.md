@@ -242,26 +242,28 @@ Content-Type: `application/json`
 
 ### 3.4.1 ContentSegment
 
-描述 `content` 中一个连续文本段落的来源信息。`content_segments` 数组始终至少包含一个元素。
+描述 `content` 中一个连续文本段落的来源信息，把合并后的 `content` 逐段映射回原始 chunk 与分块输入文本中的精确范围。普通检索结果的 `content_segments` 至少包含一个元素；无来源文本的结果（如 history 引用）为 `[]`。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `text` | string | 该 segment 在分块输入文本中的原文切片。普通结果中所有 segment 的 `text` 按顺序连接后等于 `content`；parent 展开结果的 `text` 为未裁剪原文切片（见下文「Parent 展开」） |
+| `text` | string | 该 segment 在分块输入文本中的原文切片。普通结果的各 segment `text` 按序连接（段间可能间隔合成分隔符）覆盖 `content`；parent 展开结果的父段为未裁剪原文切片（见下文「Parent 展开」）；`[0, 0)` 段为仅快照可用的文本 |
 | `chunk_id` | string | 该 segment 文本所属的 chunk ID |
 | `knowledge_id` | string | 所属 Knowledge（文件）ID |
 | `source_start` | int | Segment 文本在分块输入文本中的起始 rune 偏移（含），意义同顶层 `start_at` |
 | `source_end` | int | Segment 文本在分块输入文本中的结束 rune 偏移（不含），意义同顶层 `end_at` |
 | `chunk_type` | string | 来源 chunk 的类型，值同顶层 `chunk_type` |
 
-**用途**：Merge、邻居扩展、父子分块解析等阶段会把多个 chunk 的文本合并到统一的 `content`。`content_segments` 将合并后的文本逐段映射回各自的原始 chunk 和源文本范围。每种合并操作（重叠区间合并、父子展开、邻居扩展等）在修改 `content` 的同时，对应地在 `content_segments` 中追加或更新 segment。
+**用途**：Merge、邻居扩展、父子分块解析等阶段会把多个 chunk 的文本合并到统一的 `content`。`content_segments` 将合并后的文本逐段映射回各自的原始 chunk 和源文本范围。每种合并操作（重叠区间合并、父子展开、邻居扩展等）在修改 `content` 的同时，对应地在 `content_segments` 中追加、裁剪或更新 segment。
 
 **不变式**：
 
-- 每个 segment 满足 `source_end - source_start == runeLen(text)`
+- **可定位段**：`source_end - source_start == runeLen(text)` 且 `artifact[source_start:source_end] == text`（exact-slice 恒等式）。重叠裁剪、邻居截断、join 去重等操作后的段依然成立
+- **伪 range 段**：`source_start == source_end == 0`，`text` 必须非空；`runeLen(text) != 0` 是**有意例外**，标识生成型或不可定位内容（data_analysis 输出、FAQ 答案、编辑过或范围不可信的 chunk），不得用于切片定位
 - 若某个 chunk 的全部内容已被前一 chunk 重叠覆盖（去重后无独占文本），则该 chunk 不产生 segment，其语义内容已由覆盖它的 segment 承载
-- `content` 不包含仅由合并产生的合成字符（如分隔符、连接符）
+- 合成分隔符：不可信对的文本合并（join）、邻居扩展、parent 展开会产生合成 `\n\n` 分隔符 rune，**不属于任何 segment**；普通结果的 `content` 等于各段 `text` 按序连接并在段间插入合成分隔符（无分隔符场景下即严格相等）
+- 顶层 `content_segments` 缺失（字段省略）或为 `[]` 的结果整体视为不可定位
 
-示例（两个 chunk 合并后的 `content_segments`）：
+示例（两个 chunk 重叠合并、无合成分隔符场景下的 `content_segments`）：
 
 ```json
 {
@@ -287,13 +289,17 @@ Content-Type: `application/json`
 }
 ```
 
-**普通结果**（非 parent 展开）：各 segment 的 `text` 构成 `content` 的无重叠分区——`content` 中每个 rune 恰好属于一个 segment，`text` 连接后等于 `content`。定位 `content` 中 rune 区间 `[pos, pos+len)` 内的子串：若其全部位于某个 segment `s` 的覆盖范围内，则其在分块输入文本中的对应区间为 `[s.source_start + offset, s.source_start + offset + len)`，其中 `offset` 是子串在 `s.text` 内的起始 rune 偏移；跨多个 segment 的子串，原文范围由所属各 segment 的对应区间拼接表达。
+**普通结果**（非 parent 展开、非生成型）：各 segment 的 `text` 构成 `content` 的分区（段间可能间隔合成分隔符）。定位 `content` 中的任意子串：先在某个 segment `s` 的 `text` 内定位该子串（或其各部分）——子串在 `s.text` 内的起始 rune 偏移记为 `offset`，则其在分块输入文本中的对应区间为 `[s.source_start + offset, s.source_start + offset + len)`；跨多个 segment 的子串，原文范围由所属各 segment 的对应区间拼接表达。**禁止通过累加各段 `text` 长度推算 `content` 内的全局偏移**——段间可能存在不属任何 segment 的合成分隔符 rune，累加结果会静默错位。
 
 **Parent 展开**
 
-当 parent-child 分块启用且 merge 将子 chunk 展开到父 chunk 上下文时，结果仅含一个 segment。此时 `segment.text` 为父 chunk 在分块输入文本中的**未裁剪原文切片**（即 `artifact[source_start:source_end]`，包含原始图片表达式、空行和首尾空白），`result.content` 为经图片裁剪、空行压缩和首尾裁剪后的 **chat 显示用文本**——两者**可不同**。定位方式：直接使用 `segment.text` + `source_start` / `source_end` 在 artifact 中切片，即 `artifact[source_start:source_end] == segment.text`，不应依赖 `segment.text` 与 `result.content` 相等。
+当 parent-child 分块启用且 merge 将子 chunk 展开到父 chunk 上下文时，结果包含两个 segment（父 chunk 受信时）：父段 + 子段。
 
-**单 chunk 与生成型结果**：单个未经合并的 chunk 的结果，`content_segments` 仍含一个 segment，其 `source_start` / `source_end` 与顶层 `start_at` / `end_at` 一致——消费者可始终使用 `content_segments` 定位，无需根据合并状态切换路径。`chunk_type = "summary"` / `"entity"` 等生成型结果的 segment 中 `source_start` / `source_end` 均为 `0`，视为仅快照可用；伪 range（`[0, 0)`）的 segment 的 `text` 必须非空，不得用于切片。
+- **父段**：`text` 为父 chunk 在分块输入文本中的**未裁剪原文切片**（`artifact[source_start:source_end] == text`，含原始图片表达式、空行和首尾空白）；`content` 中对应的父部分为经图片裁剪、空行压缩后的 chat 显示用文本——两者**可不同**。父段**仅在父 chunk 范围可信时输出**：`ContentRevision == 0`、`EndAt > StartAt` 且 `runeLen(Content) == EndAt - StartAt`；父 chunk 不可信时**跳过父段，仅保留子段**（父部分文本在 `content` 中成为无段归属的合成 gap）
+- **子段**：子 chunk 自身的精确范围段，继承自创建时的初始段；父子文本 join 时若发生包含去重或重叠裁剪，段列表按 join 结果同步调整
+- 定位：父段直接使用 `text` + `source_start` / `source_end` 在 artifact 中切片，不应依赖 `text` 与 `content` 相等；子段按普通结果规则定位
+
+**单 chunk 与生成型结果**：单个未经合并的 chunk 的结果，`content_segments` 仍含一个可定位 segment，其 `source_start` / `source_end` 与顶层 `start_at` / `end_at` 一致——消费者可始终使用 `content_segments` 定位，无需根据合并状态切换路径。`chunk_type = "summary"` / `"entity"` 等生成型结果，以及**编辑过或范围不可信的 chunk**（`ContentRevision > 0`、范围缺失或 `runeLen(Content) != EndAt - StartAt`）的结果，其 segment 的 `source_start` / `source_end` 均为 `0`——这是**显式降级标记**：内容仅快照可用，消费者不得猜测或模糊定位。
 
 > `source_start` / `source_end` 指向分块输入文本，不是 `content` 本身。存在 content 合并时顶层 `start_at` / `end_at` 不代表 `content` 完整范围，此时应使用 `content_segments` 精确定位。
 
@@ -372,7 +378,7 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK(含 MMR 选 Top K) 
 对 rerank 后的结果做合并与标准化处理：
 
 - 按 `knowledge_id` + `chunk_type` 分组，合并重叠区间
-- Parent-child 分块展开：子 chunk 的 `parent_chunk_id` 指向父 chunk，merge 阶段将子 chunk 的内容范围展开到父 chunk
+- Parent-child 分块展开：子 chunk 的 `parent_chunk_id` 指向父 chunk，merge 阶段将父 chunk 上下文拼接到子 chunk 内容前（父 chunk 范围不可信时仅保留子内容）；`content_segments` 按 [3.4.1](#341-contentsegment) 的「Parent 展开」规则输出父段与子段
 - FAQ 类型结果的 `content` 为格式化后的标准问题与答案；`matched_content` 为检索实际命中的标准问题或相似问题
 - 短上下文 chunk 通过 `pre_chunk_id` / `next_chunk_id` 链表扩展邻居 chunk
 - 最终去重（按 chunk ID + content signature）
