@@ -78,6 +78,10 @@ func TestSearchResultFromMap_RoundTrip(t *testing.T) {
 		KnowledgeDescription: "desc",
 		KnowledgeBaseID:      "kb-1",
 		Metadata:             map[string]string{"page": "3"},
+		ContentSegments: []types.ContentSegment{
+			{Text: "first part", ChunkID: "chunk-1", KnowledgeID: "knowledge-1", SourceStart: 0, SourceEnd: 10, ChunkType: "text"},
+			{Text: "second part", ChunkID: "chunk-2", KnowledgeID: "knowledge-1", SourceStart: 11, SourceEnd: 22, ChunkType: "text"},
+		},
 	}
 
 	raw, err := json.Marshal(original)
@@ -104,4 +108,12 @@ func TestSearchResultFromMap_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.KnowledgeDescription, got.KnowledgeDescription)
 	assert.Equal(t, original.KnowledgeBaseID, got.KnowledgeBaseID)
 	assert.Equal(t, original.Metadata, got.Metadata)
+	require.Len(t, got.ContentSegments, 2)
+	assert.Equal(t, original.ContentSegments[0], got.ContentSegments[0])
+	assert.Equal(t, original.ContentSegments[1], got.ContentSegments[1])
+}
+
+func TestSearchResultFromMap_NoSegmentsKey(t *testing.T) {
+	sr := searchResultFromMap(map[string]interface{}{"id": "chunk-1", "content": "x"})
+	assert.Nil(t, sr.ContentSegments)
 }
