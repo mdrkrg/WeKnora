@@ -64,6 +64,12 @@ type SessionService interface {
 	// knowledgeBaseIDs: list of knowledge base IDs to search (supports multi-KB)
 	// knowledgeIDs: list of specific knowledge (file) IDs to search
 	SearchKnowledge(ctx context.Context, knowledgeBaseIDs []string, knowledgeIDs []string, tagScopes []types.TagScope, query string, rerankModelID string) ([]*types.SearchResult, error)
+	// ResolveKnowledgeQAModel resolves a KnowledgeQA model ID from a user-supplied
+	// string (UUID, unique name, or empty for tenant default).
+	// Resolution rules: active KnowledgeQA models only; UUID exact match first;
+	// name must match exactly one active model; empty input requires exactly
+	// one default active model. Returns typed errors (400/403/500).
+	ResolveKnowledgeQAModel(ctx context.Context, requested string) (string, error)
 	// AgentQA performs agent-based question answering with conversation history and streaming support.
 	AgentQA(ctx context.Context, req *types.QARequest, eventBus *event.EventBus) error
 }
