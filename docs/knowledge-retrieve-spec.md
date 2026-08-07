@@ -343,7 +343,7 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK(含 MMR 选 Top K) 
 
 并行执行两路检索，结果合并去重：
 
-1. **Chunk Search**：使用 `rewrite_query` 做**向量 + 关键词**混合检索（hybrid，不使用直接加载）。检索参数（`vector_threshold`、`keyword_threshold`、`embedding_top_k`）来自 Tenant RetrievalConfig。这是核心阶段——任一目标 KB / Knowledge 的 Chunk Search 失败时整个请求返回 500，不返回其他目标的部分结果；检索成功但没有命中不是错误。
+1. **Chunk Search**：使用 `rewrite_query` 做**向量 + 关键词**混合检索（hybrid，不使用直接加载）。检索参数（`vector_threshold`、`keyword_threshold`、`embedding_top_k`）来自 Tenant RetrievalConfig。这是核心阶段——任一目标 KB / Knowledge 的 Chunk Search 失败且无任何可返回结果时整个请求返回 500；若 Entity Search 成功产出部分结果，则 Chunk Search 的失败被降级忽略，仅返回 Entity Search 的结果（见 [5.3 管线级降级](#53-管线级降级)）；检索成功但没有命中不是错误。
 2. **Entity Search**：使用实体提取返回的实体在知识图谱中查找关联 chunk，仅在实体非空时执行。对每个实体调 graph repository 搜索关联的 `GraphNode` + `GraphRelation`，经 graph → chunk 映射表反查关联 chunk，作为补充结果并入候选集。
 
 **跳过条件**：若查询理解判定无需检索（意图为 `chitchat` / `greeting` / `follow_up` / `web_search` / `image_only` / `doc_only`），并行检索整体跳过，`results` 为空数组。
@@ -365,7 +365,7 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK(含 MMR 选 Top K) 
 
 使用 rerank 模型对候选集重新打分，并按 Tenant RetrievalConfig 的 `rerank_threshold` 过滤低相关性候选。此阶段产生最终 `score`；随后在同一阶段内用 MMR（Maximal Marginal Relevance）从 rerank 后的候选中选出最多 K 条（K = `rerank_top_k`，lambda = 0.7），写入内部 `RerankResult`。因此本阶段同时完成 Top K 选择，后续 `FILTER_TOP_K` 仅作兜底截断。
 
-`rerank_model_id` 接受模型 ID 或唯一名称；省略时先取 Tenant RetrievalConfig 的 `rerank_model_id`，未配置则自动选择第一个可用的 Rerank 模型。**没有可用 rerank 模型时跳过整个 rerank 阶段（含 MMR 选 Top K），`FILTER_TOP_K` 兜底截断到 `rerank_top_k` 条，返回按 Chunk Search 原始分数排序的结果**；rerank 模型加载/调用失败时返回 500（见 [5.2 HTTP 级错误](#52-http-级错误)）；rerank 成功但没有候选通过阈值时返回空结果。
+`rerank_model_id` 接受模型 ID 或唯一名称；省略时先取 Tenant RetrievalConfig 的 `rerank_model_id`，未配置则自动选择第一个可用的 Rerank 模型。**没有可用 rerank 模型时跳过整个 rerank 阶段（含 MMR 选 Top K），`FILTER_TOP_K` 兜底截断到 `rerank_top_k` 条，返回按 Chunk Search 原始分数排序的结果**；rerank 模型**加载**失败时返回 500（见 [5.2 HTTP 级错误](#52-http-级错误)），模型**调用**（API）失败时降级为未 rerank 的结果（见 [5.3 管线级降级](#53-管线级降级)）；rerank 成功但没有候选通过阈值时返回空结果。
 
 ### 4.6 Merge（合并）
 
@@ -381,12 +381,13 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK(含 MMR 选 Top K) 
 
 ### 4.7 展示排序
 
-入选集合（最终 Top K）由 rerank 阶段内的 MMR 确定（见 [4.5 Rerank](#45-rerank重排序)），因此不保证等于按 `score` 直接排序得到的前 K 条。本阶段仅在响应投影时对已入选结果排序，不改变入选集合：
+入选集合（最终 Top K）由 rerank 阶段内的 MMR 确定（见 [4.5 Rerank](#45-rerank重排序)），因此不保证等于按 `score` 直接排序得到的前 K 条。本阶段仅在响应投影时对已入选结果做确定性排序，不改变入选集合；同分数结果按以下 tiebreaker 保证可复现：
 
 1. `score` 降序
 2. `knowledge_id` 升序
-3. `start_at` 升序
-4. `id` 升序
+3. `chunk_type` 升序
+4. `chunk_index` 升序
+5. `id` 升序
 
 返回数组保持该展示顺序；`chunk_index` 仅表示 Chunk 在文件中的位置，不表示响应排名。
 
@@ -415,14 +416,14 @@ QUERY_UNDERSTAND? → CHUNK_SEARCH_PARALLEL → CHUNK_RERANK(含 MMR 选 Top K) 
 |---:|---:|---|
 | 400 | 1000 | `query` 为空、没有知识库/Knowledge/有效 Tag mention 作为检索范围、仅提供裸 `tag_ids` 而无 KB 或 Knowledge 范围、Tag 所属 KB 不在请求范围内、Tag mention 结构非法或类型不支持、`chat_model_id` 或 `rerank_model_id` 按名称匹配到多个模型、`history` 含非法 role（非 `user`/`assistant`）、`history` 超过 100 条 |
 | 401 | 1001 | 缺失、无效或过期的认证凭证，或认证凭证无法解析出有效 Tenant |
-| 403 | 1002 | 身份有效但 Tenant 角色低于 Viewer、API Key 既无 `retrieve` capability 也非 `full_access`，或无权访问指定的 KB / Knowledge / Tag / 模型。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分具体原因 |
+| 403 | 1002 | 身份有效但 Tenant 角色低于 Viewer、API Key 既无 `retrieve` capability 也非 `full_access`，或无权访问指定的 KB / Knowledge / Tag / 模型，或 `rerank_model_id` 传入但在 Tenant 可访问模型中无法匹配。为防信息泄露，对无权访问和资源不存在统一返回 403，不区分具体原因 |
 | 413 | 1011 | 请求体超过 10 MB |
-| 500 | 1007 | Chunk Search 任一目标执行失败、rerank 模型加载/调用失败、Merge 或 MMR 失败、其他管线内部错误；或 `enable_query_understand=true`、未传 `chat_model_id` 时 Tenant 没有默认 KnowledgeQA 模型或存在多个默认 KnowledgeQA 模型；或 `rerank_model_id` 传入但在 Tenant 可访问模型中无法匹配 |
+| 500 | 1007 | Chunk Search 任一目标执行失败且无任何可返回结果、rerank 模型加载失败、Merge 或 MMR 失败、其他管线内部错误；或 `enable_query_understand=true`、未传 `chat_model_id` 时 Tenant 没有默认 KnowledgeQA 模型或存在多个默认 KnowledgeQA 模型 |
 | 504 | 1009 | 请求超过服务端整体超时时间 |
 
 ### 5.3 管线级降级
 
-Query Understanding、Entity Extraction / Entity Search、Local Query Expansion 和 Rerank 是可选增强阶段，失败时按下表降级；已配置的 rerank 模型加载/调用失败时不降级，返回 500。Chunk Search、Merge 和 Filter Top K 是核心阶段，失败时不降级，也不返回部分或未经完整管线处理的结果。
+Query Understanding、Entity Extraction / Entity Search、Local Query Expansion 和 Rerank 是可选增强阶段，失败时按下表降级；已配置的 rerank 模型**加载**失败时不降级，返回 500。Merge 和 Filter Top K 是核心阶段，失败时不降级，也不返回部分或未经完整管线处理的结果。Chunk Search 失败时按下表处理（仅在无任何可返回结果时返回 500）。
 
 | 场景 | 行为 |
 |---|---|
@@ -430,7 +431,9 @@ Query Understanding、Entity Extraction / Entity Search、Local Query Expansion 
 | Query Understanding LLM 调用失败、输出无法解析或返回未知 `intent` | `rewrite_query` = 原始 `query`，`intent` = `kb_search`，管线继续 |
 | Entity Extraction LLM 调用失败，或 Neo4j 未启用 | 实体为空，跳过 Entity Search，Chunk Search 和后续阶段继续 |
 | Entity Search 无可用知识图谱或执行失败 | 仅使用 Chunk Search 结果继续管线 |
+| Chunk Search 全部失败 | 若 Entity Search 无结果，整个请求返回 500；若 Entity Search 有结果，仅返回 Entity Search 的结果继续管线 |
 | 没有可用 rerank 模型 | 跳过 rerank 阶段（含 MMR 选 Top K），使用 Chunk Search 结果继续，`FILTER_TOP_K` 兜底截断到 `rerank_top_k` 条（按 Chunk Search 原始分数排序） |
+| rerank 模型调用（API）失败 | 降级为未 rerank 的结果：使用 Chunk Search 原始结果继续管线（`FILTER_TOP_K` 兜底截断），不返回 500 |
 | Local Query Expansion 失败或未额外召回 | 忽略失败或无新增结果的扩展，使用初始 Chunk Search 结果继续管线 |
 | 意图判定无需检索 | `results` = `[]`，`rewrite_query` 和 `intent` 正常返回（见 [3.3 意图分类](#33-意图分类)） |
 | 检索结果为空 | `results` = `[]`，仍返回 `rewrite_query` + `intent` |
