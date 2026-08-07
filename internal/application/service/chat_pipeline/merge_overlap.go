@@ -210,18 +210,22 @@ func (p *PluginMerge) appendJoinedSegments(dst, src *types.SearchResult, beforeC
 }
 
 // addTrimmedSegments copies segments from src to dst, trimming overlapLen
-// runes from the front of the first segment's text and adjusting its
-// source_start accordingly. Fully trimmed segments (text becomes empty)
-// are skipped.
+// runes from the front of the concatenated text across all segments.
+// Trimming stops once overlapLen runes have been consumed; fully consumed
+// segments are skipped. source_start on the first partially consumed
+// segment is adjusted accordingly.
 func (p *PluginMerge) addTrimmedSegments(dst *types.SearchResult, src *types.SearchResult, overlapLen int) {
-	for i, seg := range src.ContentSegments {
-		if i == 0 && overlapLen > 0 {
-			runes := []rune(seg.Text)
-			if overlapLen >= len(runes) {
-				continue // fully consumed by overlap
+	remaining := overlapLen
+	for _, seg := range src.ContentSegments {
+		runes := []rune(seg.Text)
+		if remaining > 0 {
+			if remaining >= len(runes) {
+				remaining -= len(runes)
+				continue
 			}
-			seg.Text = string(runes[overlapLen:])
-			seg.SourceStart = seg.SourceStart + overlapLen
+			seg.Text = string(runes[remaining:])
+			seg.SourceStart = seg.SourceStart + remaining
+			remaining = 0
 		}
 		dst.ContentSegments = append(dst.ContentSegments, seg)
 	}
