@@ -94,16 +94,19 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 		return nil, err
 	}
 
-	// ---- query understand (when enabled) ----
+	// ---- query understand (when enabled and rewrite allowed) ----
+	// Per spec sec. 4.2 / 5.3: when the global enable_rewrite config is false,
+	// the whole stage is skipped - no model resolution, no LLM call, no
+	// entity extraction, no history injection.
 	understand := req.EnableQueryUnderstand == nil || *req.EnableQueryUnderstand
-	if understand && s.eventManager != nil {
+	if understand && s.cfg.Conversation.EnableRewrite && s.eventManager != nil {
 		modelID, modelErr := s.ResolveKnowledgeQAModel(ctx, strings.TrimSpace(req.ChatModelID))
 		if modelErr != nil {
 			return nil, modelErr
 		}
 		chatManage.ChatModelID = modelID
 		chatManage.QueryUnderstandModelID = modelID
-		chatManage.EnableRewrite = s.cfg.Conversation.EnableRewrite
+		chatManage.EnableRewrite = true
 
 		// Inject request history for multi-turn rewrite
 		for _, message := range req.History {

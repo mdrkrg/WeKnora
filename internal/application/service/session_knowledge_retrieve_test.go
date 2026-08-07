@@ -340,6 +340,32 @@ func TestRetrieveKnowledgeDisabledQueryUnderstandSkipsStage(t *testing.T) {
 		"spec sec. 4.1: CHUNK_SEARCH_PARALLEL must still run when query understand is disabled")
 }
 
+// reference: docs/knowledge-retrieve-spec.md sec. 4.2, sec. 5.3.
+// When the global enable_rewrite config is false, the whole query
+// understanding stage is skipped - even when enable_query_understand=true.
+// No model resolution, no QUERY_UNDERSTAND trigger, no entity extraction.
+func TestRetrieveKnowledgeGlobalRewriteDisabledSkipsStage(t *testing.T) {
+	spy := &retrievePipelineSpy{
+		searchResults: []*types.SearchResult{{ID: "c-1", Content: "result"}},
+	}
+	svc := newRetrieveTestService(spy)
+	svc.cfg.Conversation.EnableRewrite = false
+
+	enabled := true
+	req := &types.KnowledgeRetrieveRequest{
+		QARequest:             types.QARequest{Query: "test", KnowledgeBaseIDs: []string{testKBID}},
+		EnableQueryUnderstand: &enabled,
+	}
+	_, err := svc.RetrieveKnowledge(testContext(), req)
+	require.NoError(t, err)
+
+	events := spy.recordedEvents()
+	assert.NotContains(t, events, types.QUERY_UNDERSTAND,
+		"spec sec. 5.3: QUERY_UNDERSTAND must be skipped when global enable_rewrite=false")
+	assert.Contains(t, events, types.CHUNK_SEARCH_PARALLEL,
+		"spec sec. 4.1: CHUNK_SEARCH_PARALLEL must still run")
+}
+
 // reference: docs/knowledge-retrieve-spec.md sec. 2.3, sec. 4.4.
 // EnableQueryExpansion defaults to true and flows into the ChatManage
 // pipeline request.
