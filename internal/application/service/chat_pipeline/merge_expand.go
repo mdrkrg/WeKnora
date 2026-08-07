@@ -228,6 +228,17 @@ func (p *PluginMerge) expandShortContextWithNeighbors(
 			}
 		}
 
+		// Build segments: prev chunks (document order) + base chunk + next
+		// chunks. The joins are replayed with JoinChunkContent's exact
+		// decisions so contained chunks contribute no segment and overlap
+		// trims are reflected; synthetic "\n\n" separators are tracked per
+		// segment so truncation can cut at the exact content boundary.
+		prevPart := buildExpandNeighborPart(chunkMap, prevIDs, false)
+		basePart := newExpandPart(baseChunk.Content, []types.ContentSegment{searchutil.SegmentForChunk(baseChunk)})
+		nextPart := buildExpandNeighborPart(chunkMap, nextIDs, true)
+		joined := joinExpandParts(joinExpandParts(prevPart, basePart), nextPart)
+		res.ContentSegments = truncateExpandSegments(joined, runeLen(res.Content))
+
 		pipelineInfo(ctx, "Merge", "expand_short_chunk", map[string]interface{}{
 			"chunk_id":       res.ID,
 			"prev_ids":       prevIDs,
@@ -248,6 +259,142 @@ func (p *PluginMerge) expandShortContextWithNeighbors(
 // runeLen returns the length of a string in runes
 func runeLen(s string) int {
 	return len([]rune(s))
+}
+
+// expandSegParts carries a joined text together with its segments and the
+// per-segment separator flags: flags[i] reports whether segment i is
+// preceded by a synthetic "\n\n" separator in the joined content.
+type expandSegParts struct {
+	text  string
+	segs  []types.ContentSegment
+	flags []bool
+}
+
+// newExpandPart wraps a single source part (one chunk) into expandSegParts.
+func newExpandPart(text string, segs []types.ContentSegment) expandSegParts {
+	return expandSegParts{text: text, segs: segs, flags: make([]bool, len(segs))}
+}
+
+// buildExpandNeighborPart builds the prev (document order) or next (append
+// order) neighbor part, mirroring the incremental JoinChunkContent calls of
+// the expansion loop. appendOrder mirrors the loop orientation: prev chunks
+// were prepended (new chunk first argument), next chunks appended.
+func buildExpandNeighborPart(chunkMap map[string]*types.Chunk, ids []string, appendOrder bool) expandSegParts {
+	var acc expandSegParts
+	if !appendOrder {
+		for i := len(ids) - 1; i >= 0; i-- {
+			ch := chunkMap[ids[i]]
+			if ch == nil || ch.Content == "" {
+				continue
+			}
+			acc = joinExpandParts(newExpandPart(ch.Content, []types.ContentSegment{searchutil.SegmentForChunk(ch)}), acc)
+		}
+		return acc
+	}
+	for _, id := range ids {
+		ch := chunkMap[id]
+		if ch == nil || ch.Content == "" {
+			continue
+		}
+		acc = joinExpandParts(acc, newExpandPart(ch.Content, []types.ContentSegment{searchutil.SegmentForChunk(ch)}))
+	}
+	return acc
+}
+
+// joinExpandParts replays JoinChunkContent's outcome on the segment level:
+// a contained part contributes nothing, a part fully covered by the other is
+// replaced, an overlap-trimmed join trims the second part's segments, and a
+// full join appends the second part's segments behind a synthetic separator.
+func joinExpandParts(a, b expandSegParts) expandSegParts {
+	if a.text == "" {
+		return b
+	}
+	if b.text == "" {
+		return a
+	}
+	result := searchutil.JoinChunkContent(a.text, b.text, "\n\n")
+	switch {
+	case result == a.text:
+		return a
+	case result == b.text:
+		return b
+	case result == a.text+"\n\n"+b.text:
+		segs := make([]types.ContentSegment, 0, len(a.segs)+len(b.segs))
+		segs = append(segs, a.segs...)
+		segs = append(segs, b.segs...)
+		flags := make([]bool, 0, len(a.flags)+len(b.flags))
+		flags = append(flags, a.flags...)
+		if len(b.flags) > 0 {
+			flags = append(flags, true) // separator precedes b's first segment
+			flags = append(flags, b.flags[1:]...)
+		}
+		return expandSegParts{text: result, segs: segs, flags: flags}
+	default:
+		// Overlap-trimmed join without separator: trim b's front.
+		overlap := runeLen(a.text) + runeLen(b.text) - runeLen(result)
+		segs, flags := trimExpandSegments(b, overlap)
+		out := expandSegParts{text: result}
+		out.segs = append(out.segs, a.segs...)
+		out.segs = append(out.segs, segs...)
+		out.flags = append(out.flags, a.flags...)
+		out.flags = append(out.flags, flags...)
+		return out
+	}
+}
+
+// trimExpandSegments trims overlap runes from the front of a part's segment
+// list, skipping fully consumed segments and adjusting the source_start of
+// the first partially consumed one.
+func trimExpandSegments(p expandSegParts, overlap int) ([]types.ContentSegment, []bool) {
+	remaining := overlap
+	segs := make([]types.ContentSegment, 0, len(p.segs))
+	flags := make([]bool, 0, len(p.flags))
+	for i, seg := range p.segs {
+		runes := []rune(seg.Text)
+		if remaining > 0 {
+			if remaining >= len(runes) {
+				remaining -= len(runes)
+				continue
+			}
+			seg.Text = string(runes[remaining:])
+			seg.SourceStart = seg.SourceStart + remaining
+			remaining = 0
+		}
+		segs = append(segs, seg)
+		flags = append(flags, p.flags[i])
+	}
+	return segs, flags
+}
+
+// truncateExpandSegments clips the segment list to the truncated content
+// length (maxLen cut): trailing segments beyond the boundary are dropped and
+// the straddling segment is trimmed with an adjusted source_end. Separator
+// positions come from the per-segment flags.
+func truncateExpandSegments(p expandSegParts, contentLen int) []types.ContentSegment {
+	out := make([]types.ContentSegment, 0, len(p.segs))
+	pos := 0
+	for i, seg := range p.segs {
+		if p.flags[i] {
+			if pos+2 > contentLen {
+				break
+			}
+			pos += 2
+		}
+		if pos >= contentLen {
+			break
+		}
+		segLen := runeLen(seg.Text)
+		if pos+segLen > contentLen {
+			excess := pos + segLen - contentLen
+			seg.Text = string([]rune(seg.Text)[:segLen-excess])
+			seg.SourceEnd = seg.SourceStart + segLen - excess
+			out = append(out, seg)
+			break
+		}
+		out = append(out, seg)
+		pos += segLen
+	}
+	return out
 }
 
 // mergeOrderedContent merges ordered content
