@@ -226,7 +226,8 @@ type SearchResult struct {
 	ContentRewritten bool `json:"-"`
 
 	// ContentSegments partitions Content into per-chunk source mappings.
-	// Always at least one element. Concat of all Text fields equals Content.
+	// Results with a locatable source carry at least one segment; results
+	// without source text (e.g. history references) may be nil.
 	ContentSegments []ContentSegment `json:"content_segments,omitempty"`
 }
 
@@ -235,19 +236,25 @@ type SearchResult struct {
 //
 // Contracts:
 //
-//  1. For each segment, SourceEnd - SourceStart == len([]rune(Text)).
-//     A [0,0) source range indicates a generated result with no locatable
-//     source.
+//  1. For each locatable segment, SourceEnd - SourceStart == len([]rune(Text))
+//     and artifact[SourceStart:SourceEnd] == Text (exact-slice identity).
+//     A [0,0) source range with non-empty Text is an intentional marker for
+//     generated or untrusted content (data_analysis output, FAQ answers,
+//     edited / range-inconsistent chunks): it must never be used for slicing.
 //
-//  2. For normal / overlap-merged / neighbour-expanded results, all segment
-//     Text fields concatenated in order equal SearchResult.Content.
+//  2. For normal / overlap-merged / neighbour-expanded results, the segment
+//     Text fields concatenated in order equal SearchResult.Content modulo the
+//     synthetic "\n\n" separators that join-style merges may insert between
+//     segments. Separator runes belong to no segment; consumers MUST NOT
+//     accumulate segment lengths to compute offsets inside Content.
 //
-//  3. For parent-expanded results (parent-child chunking), the single
-//     segment's Text is the unpruned parent artifact slice.  SearchResult
-//     .Content remains the pruned chat/display projection and may differ
-//     from Text.  Consumers MUST use Text for exact-slice source mapping
-//     (artifact[SourceStart:SourceEnd] == Text) and NOT assume Text equals
-//     Content.
+//  3. For parent-expanded results (parent-child chunking), the result carries
+//     the child's original segments plus a parent segment whose Text is the
+//     unpruned parent artifact slice, emitted only when the parent chunk is
+//     range-trusted (ContentRevision == 0, EndAt > StartAt, runeLen(Content)
+//     == EndAt - StartAt). When the parent is untrusted the parent segment is
+//     omitted. Consumers MUST use Text for exact-slice source mapping and NOT
+//     assume Text equals Content.
 //
 // Reference: docs/knowledge-retrieve-spec.md sec 3.4.1
 type ContentSegment struct {
