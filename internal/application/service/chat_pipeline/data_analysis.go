@@ -151,6 +151,14 @@ Return your response in the specified JSON format.`, chatManage.Query, knowledge
 		KnowledgeTitle:       knowledge.Title,
 		KnowledgeFilename:    knowledge.FileName,
 		KnowledgeDescription: knowledge.Description,
+		ContentSegments: []types.ContentSegment{{
+			Text:        toolResult.Output,
+			ChunkID:     "analysis_" + knowledge.ID,
+			KnowledgeID: knowledge.ID,
+			SourceStart: 0,
+			SourceEnd:   0,
+			ChunkType:   "data_analysis",
+		}},
 	}
 
 	chatManage.MergeResult = append(chatManage.MergeResult, analysisResult)
