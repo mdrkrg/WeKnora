@@ -38,16 +38,24 @@ func (p *PluginMerge) mergeSequentialChunks(
 			groups = append(groups, mergedGroup{result: current, lastIndex: current.ChunkIndex})
 			continue
 		case mergeExtend:
+			beforeLen := runeLen(lastChunk.Content)
 			lastChunk.Content = appendTrustedContent(lastChunk.Content, current.Content, lastChunk.EndAt-current.StartAt)
 			lastChunk.EndAt = current.EndAt
+			p.appendExtendSegments(lastChunk, current, beforeLen)
 			recordMergedChild(ctx, knowledgeID, lastChunk, current, "image_merge")
 		case mergeSubsume:
+			// The covered chunk contributes no segment: its semantic content
+			// is already carried by the covering segment.
 			recordMergedChild(ctx, knowledgeID, lastChunk, current, "image_merge_contained")
 		case mergeJoinDistinct:
-			lastChunk.Content = searchutil.JoinChunkContent(lastChunk.Content, current.Content, "\n\n")
+			beforeContent := lastChunk.Content
+			lastChunk.Content = searchutil.JoinChunkContent(beforeContent, current.Content, "\n\n")
+			p.appendJoinedSegments(lastChunk, current, beforeContent)
 			recordMergedChild(ctx, knowledgeID, lastChunk, current, "image_merge_contained")
 		case mergeJoinText:
-			lastChunk.Content = searchutil.JoinChunkContent(lastChunk.Content, current.Content, "\n\n")
+			beforeContent := lastChunk.Content
+			lastChunk.Content = searchutil.JoinChunkContent(beforeContent, current.Content, "\n\n")
+			p.appendJoinedSegments(lastChunk, current, beforeContent)
 			recordMergedChild(ctx, knowledgeID, lastChunk, current, "image_merge")
 		}
 
@@ -162,6 +170,66 @@ func recordMergedChild(ctx context.Context, knowledgeID string, target, source *
 			"error":        err.Error(),
 		})
 	}
+}
+
+// appendExtendSegments maintains dst.ContentSegments after an extend merge:
+// src's segments are appended, trimmed by the overlap the append actually
+// consumed. A fully covered src contributes no segment; per spec 3.4.1 a
+// chunk with no exclusive text produces no segment.
+func (p *PluginMerge) appendExtendSegments(dst, src *types.SearchResult, beforeLen int) {
+	appendedLen := runeLen(dst.Content) - beforeLen
+	overlapLen := runeLen(src.Content) - appendedLen
+	if overlapLen > 0 && overlapLen < runeLen(src.Content) {
+		p.addTrimmedSegments(dst, src, overlapLen)
+	} else if overlapLen == 0 {
+		p.copySegments(dst, src)
+	}
+	// overlapLen == runeLen(src.Content): fully covered, no segment.
+}
+
+// appendJoinedSegments mirrors JoinChunkContent's outcomes on the segment
+// list: a contained src contributes nothing, a dst fully covered by src is
+// replaced by src's segments, an overlap-trimmed join trims src's segments,
+// and a full join appends all of src's segments. Synthetic separators
+// ("\n\n") belong to no segment.
+func (p *PluginMerge) appendJoinedSegments(dst, src *types.SearchResult, beforeContent string) {
+	switch {
+	case dst.Content == beforeContent:
+		// src fully covered: no segments.
+	case dst.Content == src.Content:
+		// dst fully covered: the merged content is src's.
+		dst.ContentSegments = src.ContentSegments
+	default:
+		appendedLen := runeLen(dst.Content) - runeLen(beforeContent)
+		if appendedLen >= runeLen(src.Content) {
+			p.copySegments(dst, src)
+		} else if appendedLen > 0 {
+			p.addTrimmedSegments(dst, src, runeLen(src.Content)-appendedLen)
+		}
+	}
+}
+
+// addTrimmedSegments copies segments from src to dst, trimming overlapLen
+// runes from the front of the first segment's text and adjusting its
+// source_start accordingly. Fully trimmed segments (text becomes empty)
+// are skipped.
+func (p *PluginMerge) addTrimmedSegments(dst *types.SearchResult, src *types.SearchResult, overlapLen int) {
+	for i, seg := range src.ContentSegments {
+		if i == 0 && overlapLen > 0 {
+			runes := []rune(seg.Text)
+			if overlapLen >= len(runes) {
+				continue // fully consumed by overlap
+			}
+			seg.Text = string(runes[overlapLen:])
+			seg.SourceStart = seg.SourceStart + overlapLen
+		}
+		dst.ContentSegments = append(dst.ContentSegments, seg)
+	}
+}
+
+// copySegments appends all segments from src to dst without modification.
+func (p *PluginMerge) copySegments(dst *types.SearchResult, src *types.SearchResult) {
+	dst.ContentSegments = append(dst.ContentSegments, src.ContentSegments...)
 }
 
 // mergeImageInfo merges ImageInfo from source into target, deduplicating by URL.
