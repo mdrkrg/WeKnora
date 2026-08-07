@@ -122,6 +122,12 @@ func (s *sessionService) RetrieveKnowledge(ctx context.Context, req *types.Knowl
 			// Degrade gracefully per spec sec. 5.3: on failure, RewriteQuery=original,
 			// Intent=kb_search (already set in pipeline state defaults).
 		}
+
+		// Spec sec. 4.2/5.3: an unknown intent from the LLM must fall back to
+		// kb_search instead of being echoed back or silently skipping retrieval.
+		if !isKnownRetrieveIntent(chatManage.Intent) {
+			chatManage.Intent = types.IntentKBSearch
+		}
 	}
 
 	// After query understand, check whether retrieval is needed.
@@ -219,6 +225,19 @@ func retrieveMatchType(mt types.MatchType) string {
 		return labels[mt]
 	}
 	return "unknown"
+}
+
+// isKnownRetrieveIntent reports whether intent is one of the nine documented
+// intents (spec sec. 3.3). Unknown values from the LLM fall back to kb_search.
+func isKnownRetrieveIntent(intent types.QueryIntent) bool {
+	switch intent {
+	case types.IntentKBSearch, types.IntentWebSearch, types.IntentGreeting,
+		types.IntentChitchat, types.IntentFollowUp, types.IntentImageOnly,
+		types.IntentDocOnly, types.IntentSummarize, types.IntentClarification:
+		return true
+	default:
+		return false
+	}
 }
 
 func uniqueRetrieveStrings(values []string) []string {

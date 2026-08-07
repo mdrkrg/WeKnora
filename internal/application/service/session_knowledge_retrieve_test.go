@@ -366,6 +366,30 @@ func TestRetrieveKnowledgeGlobalRewriteDisabledSkipsStage(t *testing.T) {
 		"spec sec. 4.1: CHUNK_SEARCH_PARALLEL must still run")
 }
 
+// reference: docs/knowledge-retrieve-spec.md sec. 4.2, sec. 5.3.
+// An unknown intent returned by the LLM must fall back to kb_search instead
+// of being echoed back or silently skipping retrieval.
+func TestRetrieveKnowledgeUnknownIntentFallsBackToKBSearch(t *testing.T) {
+	spy := &retrievePipelineSpy{
+		quIntent:      "made_up_intent",
+		quRewrite:     "rewritten",
+		searchResults: []*types.SearchResult{{ID: "c-1", Content: "result"}},
+	}
+	svc := newRetrieveTestService(spy)
+
+	req := &types.KnowledgeRetrieveRequest{
+		QARequest: types.QARequest{Query: "test", KnowledgeBaseIDs: []string{testKBID}},
+	}
+	result, err := svc.RetrieveKnowledge(testContext(), req)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, types.IntentKBSearch, result.Intent,
+		"spec sec. 4.2/5.3: unknown intent must fall back to kb_search")
+	assert.NotEmpty(t, result.Results,
+		"kb_search must not skip retrieval")
+}
+
 // reference: docs/knowledge-retrieve-spec.md sec. 2.3, sec. 4.4.
 // EnableQueryExpansion defaults to true and flows into the ChatManage
 // pipeline request.
