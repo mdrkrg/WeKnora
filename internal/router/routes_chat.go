@@ -104,4 +104,10 @@ func RegisterChatRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbacGua
 	{
 		knowledgeSearch.POST("", handler.SearchKnowledge)
 	}
+
+	// 知识检索增强接口：查询理解 + 并行检索 + 本地查询扩展，无 LLM 生成
+	knowledgeRetrieve := g.apiKeyGroup(r.Group("/knowledge-retrieve", g.Viewer()), apiKeyRetrieve(apiKeyFullAccess()))
+	{
+		knowledgeRetrieve.POST("", handler.KnowledgeRetrieve)
+	}
 }
