@@ -173,3 +173,26 @@ export async function putDataSourceCredentials(
 export async function deleteDataSourceCredentials(id: string): Promise<void> {
   await del(`/api/v1/datasource/${id}/credentials/credentials`)
 }
+
+// --- Canvas / data-source OAuth2 ---
+
+export const DS_OAUTH_CALLBACK_PATH = '/api/v1/datasource/oauth/callback'
+
+export async function getDataSourceOAuthAuthorizeURL(
+  id: string,
+  body: { redirect_uri: string; frontend_redirect?: string },
+): Promise<string> {
+  const response: any = await post(`/api/v1/datasource/${id}/oauth/authorize-url`, body)
+  const data = response?.data ?? response
+  return data?.authorization_url || data?.data?.authorization_url || ''
+}
+
+export async function getDataSourceOAuthStatus(id: string): Promise<boolean> {
+  const response: any = await get(`/api/v1/datasource/${id}/oauth/status`)
+  const data = response?.data ?? response
+  return !!(data?.authorized ?? data?.data?.authorized)
+}
+
+export async function revokeDataSourceOAuth(id: string): Promise<void> {
+  await del(`/api/v1/datasource/${id}/oauth/token`)
+}

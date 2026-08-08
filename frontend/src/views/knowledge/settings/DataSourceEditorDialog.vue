@@ -13,9 +13,15 @@ import {
   deleteDataSource,
   putDataSourceCredentials,
   deleteDataSourceCredentials,
+  getDataSourceOAuthAuthorizeURL,
+  getDataSourceOAuthStatus,
+  revokeDataSourceOAuth,
+  DS_OAUTH_CALLBACK_PATH,
   type DataSource,
   type Resource,
 } from '@/api/datasource'
+import { getCanvasOAuthStatus } from '@/api/canvas-oauth'
+import { useUIStore } from '@/stores/ui'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import { getDatasourceIconUrl } from './datasourceIcons'
@@ -28,6 +34,7 @@ const props = defineProps<{
 const visible = defineModel<boolean>('visible', { default: false })
 const emit = defineEmits<{ saved: [] }>()
 const { t } = useI18n()
+const uiStore = useUIStore()
 
 const isEdit = computed(() => !!props.dataSource)
 const step = ref(0)
@@ -596,6 +603,17 @@ const connectorDefs = computed<ConnectorDef[]>(() => [
       { key: 'auth_headers', labelKey: 'datasource.field.authHeaders', placeholder: '', optional: true, hintKey: 'datasource.field.authHeadersHint', fieldType: 'custom_headers' },
     ],
   },
+  {
+    type: 'canvas',
+    available: true,
+    docUrl: 'https://canvas.instructure.com/doc/api/file.oauth.html',
+    permissionDocUrl: 'https://canvas.instructure.com/doc/api/file.oauth.html',
+    permissionPageUrl: '',
+    requiredPermissions: [],
+    // App credentials (base_url / client_id / client_secret) are fixed by
+    // workspace admins in Settings → Canvas LMS. Users only authorize OAuth.
+    fields: [],
+  },
 ])
 
 
@@ -669,6 +687,10 @@ watch(visible, async (v) => {
       }
     }
     tempDsId.value = props.dataSource.id
+    if (form.value.type === 'canvas') {
+      void refreshCanvasAppStatus()
+      void refreshOAuthStatus(props.dataSource.id)
+    }
   } else {
     replaceCredentialsMode.value = false
     credentialsConfigured.value = false
@@ -717,13 +739,31 @@ watch(
   },
 )
 
-function selectType(def: ConnectorDef) {
+const canvasAppConfigured = ref(true)
+const canvasAppChecking = ref(false)
+
+async function refreshCanvasAppStatus() {
+  canvasAppChecking.value = true
+  try {
+    const status = await getCanvasOAuthStatus()
+    canvasAppConfigured.value = !!status.configured
+  } catch {
+    canvasAppConfigured.value = false
+  } finally {
+    canvasAppChecking.value = false
+  }
+}
+
+async function selectType(def: ConnectorDef) {
   if (!def.available) return
   form.value.type = def.type
   form.value.name = t(`datasource.connector.${def.type}`)
   form.value.config.credentials = {}
   rssAuthHeaders.value = []
   step.value = 1
+  if (def.type === 'canvas') {
+    await refreshCanvasAppStatus()
+  }
 }
 
 // --- Test connection (stateless, no DB write) ---
@@ -941,7 +981,14 @@ function validateStep1Fields(): boolean {
 async function nextStep() {
   if (step.value === 1) {
     if (!validateStep1Fields()) return
-    if (needsConnectionTest() && testResult.value !== 'success') {
+    if (form.value.type === 'canvas') {
+      if (!canvasAppConfigured.value) {
+        MessagePlugin.warning(t('datasource.canvasAppRequired'))
+        return
+      }
+      const ok = await ensureCanvasAuthorized()
+      if (!ok) return
+    } else if (needsConnectionTest() && testResult.value !== 'success') {
       await testConnection()
       if ((testResult.value as string) !== 'success') return
     }
@@ -968,6 +1015,121 @@ async function nextStep() {
       return
     }
     loadResources()
+  }
+}
+
+const oauthAuthorized = ref(false)
+const oauthAuthorizing = ref(false)
+const oauthChecking = ref(false)
+
+async function refreshOAuthStatus(dsId?: string) {
+  const id = dsId || tempDsId.value
+  if (!id || form.value.type !== 'canvas') {
+    oauthAuthorized.value = false
+    return
+  }
+  oauthChecking.value = true
+  try {
+    oauthAuthorized.value = await getDataSourceOAuthStatus(id)
+  } catch {
+    oauthAuthorized.value = false
+  } finally {
+    oauthChecking.value = false
+  }
+}
+
+async function ensureCanvasDataSource(): Promise<string | null> {
+  if (tempDsId.value) {
+    if (!isEdit.value) {
+      await updateDataSource(tempDsId.value, {
+        ...form.value,
+        knowledge_base_id: props.kbId,
+      } as any)
+    } else if (replaceCredentialsMode.value) {
+      const ok = await commitCredentialsIfNeeded(tempDsId.value)
+      if (!ok) return null
+    }
+    return tempDsId.value
+  }
+  const res = await createDataSource({
+    ...form.value,
+    knowledge_base_id: props.kbId,
+    status: 'paused',
+  } as any)
+  const created = res?.data || res
+  tempDsId.value = created.id
+  return tempDsId.value
+}
+
+async function authorizeCanvasOAuth() {
+  if (!canvasAppConfigured.value) {
+    MessagePlugin.warning(t('datasource.canvasAppRequired'))
+    return
+  }
+  if (!validateStep1Fields()) return
+  oauthAuthorizing.value = true
+  try {
+    const dsId = await ensureCanvasDataSource()
+    if (!dsId) {
+      oauthAuthorizing.value = false
+      return
+    }
+    const redirectUri = window.location.origin + DS_OAUTH_CALLBACK_PATH
+    const authUrl = await getDataSourceOAuthAuthorizeURL(dsId, {
+      redirect_uri: redirectUri,
+      frontend_redirect: window.location.href.split('#')[0],
+    })
+    if (!authUrl) {
+      MessagePlugin.error(t('datasource.oauthAuthorizeFailed'))
+      oauthAuthorizing.value = false
+      return
+    }
+    const popup = window.open(authUrl, 'ds_oauth', 'width=720,height=800')
+    const timer = window.setInterval(async () => {
+      const closed = !popup || popup.closed
+      try {
+        oauthAuthorized.value = await getDataSourceOAuthStatus(dsId)
+      } catch {
+        /* ignore poll errors */
+      }
+      if (oauthAuthorized.value || closed) {
+        window.clearInterval(timer)
+        oauthAuthorizing.value = false
+        if (oauthAuthorized.value) {
+          testResult.value = 'success'
+          MessagePlugin.success(t('datasource.oauthAuthorizedToast'))
+        }
+      }
+    }, 1500)
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('datasource.oauthAuthorizeFailed'))
+    oauthAuthorizing.value = false
+  }
+}
+
+async function revokeCanvasOAuth() {
+  if (!tempDsId.value) return
+  try {
+    await revokeDataSourceOAuth(tempDsId.value)
+    oauthAuthorized.value = false
+    testResult.value = ''
+    MessagePlugin.success(t('datasource.oauthRevokedToast'))
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('datasource.oauthRevokeFailed'))
+  }
+}
+
+async function ensureCanvasAuthorized(): Promise<boolean> {
+  try {
+    const dsId = await ensureCanvasDataSource()
+    if (!dsId) return false
+    await refreshOAuthStatus(dsId)
+    if (oauthAuthorized.value) return true
+    MessagePlugin.warning(t('datasource.oauthRequired'))
+    return false
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('datasource.saveFailed'))
+    return false
   }
 }
 
@@ -1125,6 +1287,9 @@ const resourceTypeLabelMap: Record<string, string> = {
   wiki_space: 'datasource.resourceType.wikiSpace',
   doc_category: 'datasource.resourceType.docCategory',
   book: 'datasource.resourceType.book',
+  course: 'datasource.resourceType.course',
+  folder: 'datasource.resourceType.folder',
+  file: 'datasource.resourceType.file',
 }
 
 function resourceTypeLabel(type: string): string {
@@ -1365,7 +1530,44 @@ const drawerConfirmText = computed(() => {
       <section class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ t('datasource.credentialsLabel') }}</h4>
 
-        <div v-if="isEdit && credentialsConfigured && !replaceCredentialsMode" class="form-item">
+        <div v-if="form.type === 'canvas'" class="form-item oauth-block">
+          <div v-if="!canvasAppConfigured" class="oauth-admin-required">
+            <t-tag theme="warning" variant="light">{{ t('datasource.canvasAppUnconfigured') }}</t-tag>
+            <p class="form-desc">{{ t('datasource.canvasAppRequiredHint') }}</p>
+          </div>
+          <template v-else>
+            <label class="form-label">{{ t('datasource.oauthAuthorization') }}</label>
+            <div class="oauth-status">
+              <t-tag v-if="oauthAuthorized" theme="success" variant="light">
+                {{ t('datasource.oauthAuthorized') }}
+              </t-tag>
+              <t-tag v-else theme="warning" variant="light">
+                {{ t('datasource.oauthUnauthorized') }}
+              </t-tag>
+              <t-button
+                size="small"
+                theme="primary"
+                variant="outline"
+                :loading="oauthAuthorizing || oauthChecking"
+                @click="authorizeCanvasOAuth"
+              >
+                {{ oauthAuthorized ? t('datasource.oauthReauthorize') : t('datasource.oauthAuthorize') }}
+              </t-button>
+              <t-button
+                v-if="oauthAuthorized && tempDsId"
+                size="small"
+                theme="danger"
+                variant="text"
+                @click="revokeCanvasOAuth"
+              >
+                {{ t('datasource.oauthRevoke') }}
+              </t-button>
+            </div>
+            <p class="form-desc">{{ t('datasource.oauthAuthorizeHint') }}</p>
+          </template>
+        </div>
+
+        <div v-if="form.type !== 'canvas' && isEdit && credentialsConfigured && !replaceCredentialsMode" class="form-item">
           <div
             class="credential-faux-input"
             :class="{ 'is-confirm-remove': pendingRemoveCredentials }"
@@ -1407,7 +1609,7 @@ const drawerConfirmText = computed(() => {
         </div>
 
         <div
-          v-else-if="isEdit && !credentialsConfigured && !replaceCredentialsMode"
+          v-else-if="form.type !== 'canvas' && isEdit && !credentialsConfigured && !replaceCredentialsMode"
           class="form-item"
         >
           <div
@@ -1424,7 +1626,7 @@ const drawerConfirmText = computed(() => {
           </div>
         </div>
 
-        <template v-else-if="credentialsInputVisible">
+        <template v-else-if="form.type !== 'canvas' && credentialsInputVisible">
           <div
             v-for="field in currentDef?.fields || []"
             :key="field.key"
@@ -2351,6 +2553,18 @@ const drawerConfirmText = computed(() => {
   background: color-mix(in srgb, var(--td-text-color-placeholder) 12%, transparent);
   color: var(--td-text-color-secondary);
   outline: none;
+}
+
+.oauth-status,
+.oauth-admin-required {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.oauth-block .form-desc {
+  margin-top: 8px;
 }
 
 .resource-picker__check {
