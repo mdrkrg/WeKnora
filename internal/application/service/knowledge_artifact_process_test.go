@@ -135,7 +135,7 @@ func TestSaveProcessArtifacts_RejectsZeroAttempt(t *testing.T) {
 		Metadata:        map[string]string{"resolved_engine": "mineru"},
 	}
 
-	err := svc.saveProcessArtifacts(ctx, knowledge, 0, result, nil, &types.EffectiveProcessConfig{})
+	err := svc.saveProcessArtifacts(ctx, knowledge, 0, result, nil)
 	if err != nil {
 		t.Fatalf("saveProcessArtifacts returned error: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestSaveProcessArtifacts_ValidAttempt(t *testing.T) {
 		Metadata:        map[string]string{"resolved_engine": "mineru"},
 	}
 
-	err := svc.saveProcessArtifacts(ctx, knowledge, 1, result, nil, &types.EffectiveProcessConfig{})
+	err := svc.saveProcessArtifacts(ctx, knowledge, 1, result, nil)
 	if err != nil {
 		t.Fatalf("saveProcessArtifacts returned error: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestSaveProcessArtifacts_ReplacesExistingArtifact(t *testing.T) {
 		Metadata:        map[string]string{"resolved_engine": "mineru"},
 	}
 
-	err := svc.saveProcessArtifacts(ctx, knowledge, 1, result, nil, &types.EffectiveProcessConfig{})
+	err := svc.saveProcessArtifacts(ctx, knowledge, 1, result, nil)
 	if err != nil {
 		t.Fatalf("saveProcessArtifacts returned error: %v", err)
 	}

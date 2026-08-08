@@ -3519,7 +3519,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	// text before calculating chunk boundaries as well.
 	convertResult.MarkdownContent = chunker.NormalizeLineEndings(convertResult.MarkdownContent)
 
-	if err := s.saveProcessArtifacts(ctx, knowledge, attempt, convertResult, storedImages, &eff); err != nil {
+	if err := s.saveProcessArtifacts(ctx, knowledge, attempt, convertResult, storedImages); err != nil {
 		logger.Errorf(ctx, "Failed to save canonical artifacts for knowledge %s: %v", knowledge.ID, err)
 		// Remove partial artifacts written before the failure so they neither
 		// leak quota nor occupy the attempt number of a future successful parse.
@@ -3981,7 +3981,6 @@ func (s *knowledgeService) saveProcessArtifacts(
 	attempt int,
 	result *types.ReadResult,
 	storedImages []docparser.StoredImage,
-	eff *types.EffectiveProcessConfig,
 ) error {
 	if result == nil || knowledge == nil {
 		return nil
@@ -4187,6 +4186,11 @@ func (s *knowledgeService) checkQuotaAndSaveArtifact(
 	// (worker crash after artifacts were saved, asynq retry, re-parse enqueue
 	// with the same attempt) must replace the previous artifact of this type
 	// instead of accumulating duplicate rows and double-charging quota.
+	//
+	// Note the ordering: the old same-attempt artifact is removed BEFORE the
+	// quota check below. If the quota check then fails, the old artifact is
+	// already gone — harmless because same-attempt artifacts are never
+	// readable until the attempt commits, and a retry re-writes them.
 	if s.artifactRepo != nil {
 		if old, err := s.artifactRepo.GetArtifactByType(ctx, tenant.ID, knowledge.ID, attempt, artifactType, nativeKind); err == nil && old != nil {
 			if old.StorageKey != "" {
