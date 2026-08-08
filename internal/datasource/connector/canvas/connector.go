@@ -424,6 +424,17 @@ func (c *Connector) fetch(
 		}
 		updatedAt, _ := time.Parse(time.RFC3339, meta.UpdatedAt)
 		if !since.IsZero() && !updatedAt.IsZero() && !updatedAt.After(since) {
+			items = append(items, types.FetchedItem{
+				ExternalID:       encodeFileID(cf.ID),
+				Title:            meta.DisplayName,
+				FileName:         sanitizeFileName(meta.DisplayName),
+				UpdatedAt:        updatedAt,
+				SourceResourceID: cf.Source,
+				IsSkipped:        true,
+				Metadata: map[string]string{
+					"channel": types.ChannelCanvas,
+				},
+			})
 			continue
 		}
 		data, name, contentType, err := cli.DownloadFromMeta(ctx, meta)

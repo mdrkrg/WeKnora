@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +27,29 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("SSRF_WHITELIST", "127.0.0.1,localhost")
 	secutils.ResetSSRFWhitelistForTest()
 	os.Exit(m.Run())
+}
+
+func TestCanvasRefreshHelperProcess(t *testing.T) {
+	if os.Getenv("WEKNORA_CANVAS_REFRESH_HELPER") != "1" {
+		return
+	}
+	cli, err := NewClient(&Config{
+		BaseURL:      os.Getenv("WEKNORA_CANVAS_HELPER_BASE_URL"),
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		DataSourceID: "ds-cross-process-refresh",
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+	}, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if err := cli.RefreshAccessToken(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	os.Exit(0)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -248,6 +273,8 @@ type fakeCanvas struct {
 	server         *httptest.Server
 	files          map[int64]canvasFile
 	folderID       int64
+	listFilesHits  atomic.Int64
+	listFolderHits atomic.Int64
 	getFileHits    atomic.Int64
 	downloadHits   atomic.Int64
 	downloadByFile map[int64]*atomic.Int64
@@ -268,6 +295,7 @@ func newFakeCanvas(t *testing.T, folderID int64, files []canvasFile) *fakeCanvas
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(fmt.Sprintf("/api/v1/folders/%d/files", folderID), func(w http.ResponseWriter, r *http.Request) {
+		f.listFilesHits.Add(1)
 		listed := make([]canvasFile, 0, len(f.files))
 		for _, file := range f.files {
 			cp := file
@@ -282,6 +310,7 @@ func newFakeCanvas(t *testing.T, folderID int64, files []canvasFile) *fakeCanvas
 		_ = json.NewEncoder(w).Encode(listed)
 	})
 	mux.HandleFunc(fmt.Sprintf("/api/v1/folders/%d/folders", folderID), func(w http.ResponseWriter, r *http.Request) {
+		f.listFolderHits.Add(1)
 		_ = json.NewEncoder(w).Encode([]canvasFolder{})
 	})
 	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
@@ -382,8 +411,18 @@ func TestFetchIncremental_SkipsUnchangedDownloads(t *testing.T) {
 	if next == nil || !next.LastSyncTime.After(cursor.LastSyncTime) {
 		t.Fatalf("expected advanced cursor, got %#v", next)
 	}
-	if len(items) != 1 || items[0].ExternalID != "file:2" {
-		t.Fatalf("items=%v want only file:2", items)
+	if len(items) != 2 {
+		t.Fatalf("items=%v want changed and skipped files", items)
+	}
+	byID := make(map[string]types.FetchedItem, len(items))
+	for _, item := range items {
+		byID[item.ExternalID] = item
+	}
+	if !byID["file:1"].IsSkipped {
+		t.Fatalf("unchanged file was not reported as skipped: %#v", byID["file:1"])
+	}
+	if byID["file:2"].IsSkipped || len(byID["file:2"].Content) == 0 {
+		t.Fatalf("changed file was not downloaded: %#v", byID["file:2"])
 	}
 	if got := f.downloadByFile[1].Load(); got != 0 {
 		t.Fatalf("unchanged file downloaded %d times", got)
@@ -393,6 +432,37 @@ func TestFetchIncremental_SkipsUnchangedDownloads(t *testing.T) {
 	}
 	if got := f.getFileHits.Load(); got != 0 {
 		t.Fatalf("incremental folder sync must not GetFile when list meta has url; hits=%d", got)
+	}
+}
+
+// Characterization test for the current MR behavior: incremental sync avoids
+// unchanged file downloads, but it still enumerates the selected folder tree
+// to obtain updated_at metadata. When a folder-scoped Canvas "since" API or a
+// different inventory strategy is implemented, update this test to assert the
+// new lower API-call contract.
+func TestFetchIncremental_StillEnumeratesSelectedTree(t *testing.T) {
+	unchangedAt := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	f := newFakeCanvas(t, 10, []canvasFile{
+		{ID: 1, DisplayName: "old.pdf", ContentType: "application/pdf", UpdatedAt: unchangedAt.Format(time.RFC3339), FolderID: 10},
+	})
+	cfg := f.config([]string{"folder:10"})
+	cursor := &types.SyncCursor{LastSyncTime: unchangedAt.Add(time.Hour)}
+
+	items, _, err := NewConnector().FetchIncremental(context.Background(), cfg, cursor)
+	if err != nil {
+		t.Fatalf("FetchIncremental: %v", err)
+	}
+	if len(items) != 1 || !items[0].IsSkipped || items[0].ExternalID != "file:1" {
+		t.Fatalf("unchanged file should be reported as skipped, got %v", items)
+	}
+	if got := f.downloadHits.Load(); got != 0 {
+		t.Fatalf("unchanged file should not be downloaded, got %d downloads", got)
+	}
+	if got := f.listFilesHits.Load(); got == 0 {
+		t.Fatal("incremental sync did not enumerate the selected folder")
+	}
+	if got := f.listFolderHits.Load(); got == 0 {
+		t.Fatal("incremental sync did not enumerate child folders")
 	}
 }
 
@@ -426,8 +496,8 @@ func TestFetchIncremental_DirectFileUsesSingleGetFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second FetchIncremental: %v", err)
 	}
-	if len(items2) != 0 {
-		t.Fatalf("expected no items after cursor past updated_at, got %d", len(items2))
+	if len(items2) != 1 || !items2[0].IsSkipped || items2[0].ExternalID != "file:99" {
+		t.Fatalf("expected skipped file after cursor past updated_at, got %#v", items2)
 	}
 	if got := f.getFileHits.Load(); got != 1 {
 		t.Fatalf("unchanged direct file still needs one GetFile for updated_at, got %d", got)
@@ -599,6 +669,216 @@ func TestDownloadFromMeta_401RefreshesAndRetries(t *testing.T) {
 	}
 }
 
+func TestDoJSON_429HonorsRetryAfterAndRecovers(t *testing.T) {
+	var apiHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/courses", func(w http.ResponseWriter, r *http.Request) {
+		if apiHits.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cli, err := NewClient(&Config{
+		BaseURL:      srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		AccessToken:  "tok",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	started := time.Now()
+	body, err := cli.doJSON(context.Background(), http.MethodGet, "/api/v1/courses", nil)
+	if err != nil {
+		t.Fatalf("429 should recover after Retry-After: %v", err)
+	}
+	if string(body) != `[]` {
+		t.Fatalf("unexpected recovered body: %s", body)
+	}
+	if got := apiHits.Load(); got != 2 {
+		t.Fatalf("429 should be retried once, got %d requests", got)
+	}
+	if elapsed := time.Since(started); elapsed < minRateLimitBackoff {
+		t.Fatalf("Retry-After=0 should still yield for at least %v, elapsed %v", minRateLimitBackoff, elapsed)
+	}
+}
+
+func TestDoJSON_429StopsAfterBoundedRetries(t *testing.T) {
+	var apiHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/courses", func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cli, err := NewClient(&Config{
+		BaseURL:      srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		AccessToken:  "tok",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = cli.doJSON(context.Background(), http.MethodGet, "/api/v1/courses", nil)
+	if err == nil || !strings.Contains(err.Error(), "status 429") {
+		t.Fatalf("expected bounded 429 error, got %v", err)
+	}
+	if got := apiHits.Load(); got != int64(maxRateLimitRetries+1) {
+		t.Fatalf("429 retry budget should allow %d requests, got %d", maxRateLimitRetries+1, got)
+	}
+}
+
+func TestDoJSON_429WaitStopsWhenContextIsCanceled(t *testing.T) {
+	var apiHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+
+	cli, err := NewClient(&Config{
+		BaseURL:      srv.URL,
+		ClientID:     "cid",
+		ClientSecret: "sec",
+		AccessToken:  "tok",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	_, err = cli.doJSON(ctx, http.MethodGet, "/api/v1/courses", nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("429 wait should stop with its context, got %v", err)
+	}
+	if got := apiHits.Load(); got != 1 {
+		t.Fatalf("canceled wait must not retry, got %d requests", got)
+	}
+}
+
+func TestNewClient_SameDataSourceSharesRateLimiter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+
+	newClient := func(dataSourceID string) *Client {
+		cli, err := NewClient(&Config{
+			DataSourceID: dataSourceID,
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			AccessToken:  "tok",
+			RefreshToken: "refresh",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}, nil)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		return cli
+	}
+
+	clientA, clientB := newClient("ds-rate-shared"), newClient("ds-rate-shared")
+	if clientA.limiter != clientB.limiter {
+		t.Fatal("same DataSource clients must share a rate limiter")
+	}
+	clientC := newClient("ds-rate-other")
+	if clientA.limiter == clientC.limiter {
+		t.Fatal("different DataSources must not share a rate limiter")
+	}
+}
+
+func TestClientFromConfig_UsesDistributedRateLimiter(t *testing.T) {
+	var apiHits atomic.Int64
+	var limiterHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"id":101,"name":"Course"}]`)
+	}))
+	t.Cleanup(srv.Close)
+
+	config := &types.DataSourceConfig{
+		Type: types.ConnectorTypeCanvas,
+		Credentials: map[string]interface{}{
+			"base_url":      srv.URL,
+			"client_id":     "cid",
+			"client_secret": "sec",
+			"access_token":  "tok",
+			"refresh_token": "refresh",
+			"expires_at":    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		},
+		RuntimeDataSourceID: "ds-distributed-rate-hook",
+		WaitForRateLimit: func(context.Context) error {
+			limiterHits.Add(1)
+			return nil
+		},
+	}
+
+	resources, err := NewConnector().ListResources(context.Background(), config, "")
+	if err != nil {
+		t.Fatalf("ListResources: %v", err)
+	}
+	if len(resources) != 1 || apiHits.Load() != 1 || limiterHits.Load() != 1 {
+		t.Fatalf("resources=%d api hits=%d limiter hits=%d, want 1/1/1", len(resources), apiHits.Load(), limiterHits.Load())
+	}
+}
+
+func TestClientFromConfig_DistributedRateLimiterFailureStopsRequest(t *testing.T) {
+	var apiHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+
+	config := &types.DataSourceConfig{
+		Type: types.ConnectorTypeCanvas,
+		Credentials: map[string]interface{}{
+			"base_url":      srv.URL,
+			"client_id":     "cid",
+			"client_secret": "sec",
+			"access_token":  "tok",
+			"refresh_token": "refresh",
+			"expires_at":    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		},
+		RuntimeDataSourceID: "ds-distributed-rate-error",
+		WaitForRateLimit: func(context.Context) error {
+			return errors.New("redis unavailable")
+		},
+	}
+
+	_, err := NewConnector().ListResources(context.Background(), config, "")
+	if err == nil || !strings.Contains(err.Error(), "canvas distributed rate limiter") {
+		t.Fatalf("expected distributed rate limiter error, got %v", err)
+	}
+	if apiHits.Load() != 0 {
+		t.Fatalf("upstream request must not run after limiter failure, got %d", apiHits.Load())
+	}
+}
+
 func TestRefreshAccessToken_ConcurrentSingleflight(t *testing.T) {
 	var refreshHits atomic.Int64
 	started := make(chan struct{})
@@ -658,6 +938,442 @@ func TestRefreshAccessToken_ConcurrentSingleflight(t *testing.T) {
 	}
 	if cli.cfg.AccessToken != "new-tok" {
 		t.Fatalf("token not rotated, got %q", cli.cfg.AccessToken)
+	}
+}
+
+func TestRefreshAccessToken_SameDataSourceSharesSingleflight(t *testing.T) {
+	var refreshHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		if refreshHits.Add(1) > 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"refresh token already rotated"}`)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	newClient := func() *Client {
+		cli, err := NewClient(&Config{
+			DataSourceID: "ds-shared-refresh",
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			AccessToken:  "old-tok",
+			RefreshToken: "ref-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}, nil)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		return cli
+	}
+	clientA, clientB := newClient(), newClient()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, cli := range []*Client{clientA, clientB} {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			errs <- c.RefreshAccessToken(context.Background())
+		}(cli)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("shared refresh should succeed for both clients: %v", err)
+		}
+	}
+	if got := refreshHits.Load(); got != 1 {
+		t.Fatalf("same data source should refresh once, got %d refreshes", got)
+	}
+	for name, client := range map[string]*Client{"A": clientA, "B": clientB} {
+		if client.cfg.AccessToken != "new-tok" || client.cfg.RefreshToken != "ref-2" {
+			t.Fatalf("client %s did not receive shared token: access=%q refresh=%q", name, client.cfg.AccessToken, client.cfg.RefreshToken)
+		}
+	}
+}
+
+// Characterization test: process-local singleflight cannot coordinate two app
+// replicas. Under strict refresh-token rotation both processes submit the same
+// old token; Canvas accepts one request and rejects the other.
+func TestRefreshAccessToken_DifferentProcessesDoNotShareSingleflight(t *testing.T) {
+	var refreshHits atomic.Int64
+	var invalidRefreshHits atomic.Int64
+	arrived := make(chan struct{})
+	var arrivedOnce sync.Once
+	currentRefresh := "old-refresh"
+	var tokenMu sync.Mutex
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if refreshHits.Add(1) == 2 {
+			arrivedOnce.Do(func() { close(arrived) })
+		}
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			http.Error(w, "timed out waiting for concurrent refresh", http.StatusGatewayTimeout)
+			return
+		}
+
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		if r.Form.Get("refresh_token") != currentRefresh {
+			invalidRefreshHits.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":"refresh token already rotated"}`)
+			return
+		}
+		currentRefresh = "new-refresh"
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	commands := make([]*exec.Cmd, 2)
+	outputs := make([]bytes.Buffer, 2)
+	for i := range commands {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCanvasRefreshHelperProcess$")
+		cmd.Env = append(os.Environ(),
+			"WEKNORA_CANVAS_REFRESH_HELPER=1",
+			"WEKNORA_CANVAS_HELPER_BASE_URL="+srv.URL,
+		)
+		cmd.Stdout = &outputs[i]
+		cmd.Stderr = &outputs[i]
+		commands[i] = cmd
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start helper %d: %v", i, err)
+		}
+	}
+
+	succeeded := 0
+	failed := 0
+	for i, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			failed++
+			t.Logf("helper %d failed as expected: %s", i, strings.TrimSpace(outputs[i].String()))
+		} else {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Fatalf("cross-process strict rotation: succeeded=%d failed=%d outputs=%q/%q",
+			succeeded, failed, outputs[0].String(), outputs[1].String())
+	}
+	if refreshHits.Load() != 2 || invalidRefreshHits.Load() != 1 {
+		t.Fatalf("refresh hits=%d invalid=%d, want 2/1", refreshHits.Load(), invalidRefreshHits.Load())
+	}
+}
+
+func TestRefreshAccessToken_ExternalLockReloadAvoidsSecondRefresh(t *testing.T) {
+	var refreshHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		refreshHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var distributedMu sync.Mutex
+	var persistedMu sync.Mutex
+	persisted := tokenState{AccessToken: "old-access", RefreshToken: "old-refresh"}
+
+	newClient := func(dataSourceID string) *Client {
+		cli, err := NewClient(&Config{
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			DataSourceID: dataSourceID,
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+		}, func(_ context.Context, credentials map[string]interface{}) error {
+			persistedMu.Lock()
+			persisted = tokenState{
+				AccessToken:  credentialString(credentials, "access_token"),
+				RefreshToken: credentialString(credentials, "refresh_token"),
+				ExpiresAt:    credentialString(credentials, "expires_at"),
+			}
+			persistedMu.Unlock()
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		cli.acquireRefreshLock = func(context.Context) (func(), error) {
+			distributedMu.Lock()
+			return distributedMu.Unlock, nil
+		}
+		cli.onReload = func(context.Context) (map[string]interface{}, error) {
+			persistedMu.Lock()
+			defer persistedMu.Unlock()
+			return map[string]interface{}{
+				"access_token":  persisted.AccessToken,
+				"refresh_token": persisted.RefreshToken,
+				"expires_at":    persisted.ExpiresAt,
+			}, nil
+		}
+		return cli
+	}
+
+	// Different IDs bypass the process-local singleflight/cache in this unit
+	// test, modeling two separate app processes whose only shared coordinator is
+	// the external lock plus persisted credential reload.
+	clients := []*Client{newClient("process-a"), newClient("process-b")}
+	errs := make(chan error, len(clients))
+	var wg sync.WaitGroup
+	for _, cli := range clients {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			errs <- func() error {
+				source := c.currentTokenState()
+				_, err := c.refreshAccessTokenCoordinated(context.Background(), source)
+				return err
+			}()
+		}(cli)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("coordinated refresh failed: %v", err)
+		}
+	}
+	if refreshHits.Load() != 1 {
+		t.Fatalf("external coordinator should allow one Canvas refresh, got %d", refreshHits.Load())
+	}
+	for i, cli := range clients {
+		if cli.cfg.AccessToken != "new-access" || cli.cfg.RefreshToken != "new-refresh" {
+			t.Fatalf("client %d did not adopt persisted token: access=%q refresh=%q", i, cli.cfg.AccessToken, cli.cfg.RefreshToken)
+		}
+	}
+}
+
+func TestRefreshAccessToken_SameDataSourceReusesCompletedRefresh(t *testing.T) {
+	var refreshHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		if refreshHits.Add(1) > 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"refresh token already rotated"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	newClient := func() *Client {
+		cli, err := NewClient(&Config{
+			DataSourceID: "ds-sequential-refresh",
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			AccessToken:  "old-tok",
+			RefreshToken: "ref-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}, nil)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		return cli
+	}
+	clientA, clientB := newClient(), newClient()
+
+	if err := clientA.RefreshAccessToken(context.Background()); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if err := clientB.RefreshAccessToken(context.Background()); err != nil {
+		t.Fatalf("second refresh should reuse completed result: %v", err)
+	}
+	if got := refreshHits.Load(); got != 1 {
+		t.Fatalf("completed refresh should be reused, got %d token requests", got)
+	}
+	if clientB.cfg.AccessToken != "new-tok" || clientB.cfg.RefreshToken != "ref-2" {
+		t.Fatalf("stale client did not receive completed result: access=%q refresh=%q", clientB.cfg.AccessToken, clientB.cfg.RefreshToken)
+	}
+}
+
+func TestRefreshAccessToken_DifferentDataSourcesDoNotShare(t *testing.T) {
+	var refreshHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		refreshHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	newClient := func(dataSourceID string) *Client {
+		cli, err := NewClient(&Config{
+			DataSourceID: dataSourceID,
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			AccessToken:  "old-tok",
+			RefreshToken: "ref-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}, nil)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		return cli
+	}
+
+	if err := newClient("ds-a").RefreshAccessToken(context.Background()); err != nil {
+		t.Fatalf("refresh ds-a: %v", err)
+	}
+	if err := newClient("ds-b").RefreshAccessToken(context.Background()); err != nil {
+		t.Fatalf("refresh ds-b: %v", err)
+	}
+	if got := refreshHits.Load(); got != 2 {
+		t.Fatalf("different data sources must not share refreshes, got %d token requests", got)
+	}
+}
+
+func TestDoJSON_DifferentClientsSameDataSourceShareRefresh(t *testing.T) {
+	var refreshHits atomic.Int64
+	var apiHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		if refreshHits.Add(1) > 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"refresh token already rotated"}`)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	mux.HandleFunc("/api/v1/courses", func(w http.ResponseWriter, r *http.Request) {
+		apiHits.Add(1)
+		if r.Header.Get("Authorization") != "Bearer new-tok" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"expired"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	newClient := func() *Client {
+		cli, err := NewClient(&Config{
+			DataSourceID: "ds-json-shared-refresh",
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			AccessToken:  "old-tok",
+			RefreshToken: "ref-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}, nil)
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		return cli
+	}
+	clientA, clientB := newClient(), newClient()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, client := range []*Client{clientA, clientB} {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			_, err := c.doJSON(context.Background(), http.MethodGet, "/api/v1/courses", nil)
+			errs <- err
+		}(client)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("same-data-source requests should both recover: %v", err)
+		}
+	}
+	if got := refreshHits.Load(); got != 1 {
+		t.Fatalf("same data source should make one refresh request, got %d", got)
+	}
+	if got := apiHits.Load(); got != 4 {
+		t.Fatalf("each request should make one 401 and one retry, got %d API requests", got)
+	}
+}
+
+func TestRefreshAccessToken_PersistenceFailureIsSurfacedAndRetriedFromCache(t *testing.T) {
+	var persisted atomic.Int64
+	var refreshHits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		refreshHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"new-tok","refresh_token":"ref-2","expires_in":3600}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	dataSourceID := "ds-persistence-retry"
+	sharedDataSourceRefresh.cache.Delete(dataSourceID)
+	t.Cleanup(func() { sharedDataSourceRefresh.cache.Delete(dataSourceID) })
+
+	newClient := func() *Client {
+		cli, err := NewClient(&Config{
+			BaseURL:      srv.URL,
+			ClientID:     "cid",
+			ClientSecret: "sec",
+			DataSourceID: dataSourceID,
+			AccessToken:  "old-tok",
+			RefreshToken: "ref-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}, func(context.Context, map[string]interface{}) error {
+			if persisted.Add(1) == 1 {
+				return fmt.Errorf("database unavailable")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		return cli
+	}
+
+	first := newClient()
+	if err := first.RefreshAccessToken(context.Background()); err == nil || !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf("first refresh should surface persistence failure, got %v", err)
+	}
+	if first.cfg.AccessToken != "new-tok" || first.cfg.RefreshToken != "ref-2" {
+		t.Fatalf("first client did not retain rotated token in memory: access=%q refresh=%q", first.cfg.AccessToken, first.cfg.RefreshToken)
+	}
+
+	second := newClient()
+	if err := second.RefreshAccessToken(context.Background()); err != nil {
+		t.Fatalf("retry should persist the cached token: %v", err)
+	}
+	if refreshHits.Load() != 1 {
+		t.Fatalf("persistence retry must not call Canvas refresh again, hits=%d", refreshHits.Load())
+	}
+	if persisted.Load() != 2 {
+		t.Fatalf("persistence callback count=%d want 2", persisted.Load())
+	}
+	if second.cfg.AccessToken != "new-tok" || second.cfg.RefreshToken != "ref-2" {
+		t.Fatalf("second client did not receive cached token: access=%q refresh=%q", second.cfg.AccessToken, second.cfg.RefreshToken)
 	}
 }
 

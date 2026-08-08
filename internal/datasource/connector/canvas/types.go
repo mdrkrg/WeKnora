@@ -23,6 +23,7 @@ const (
 // App fields (BaseURL/ClientID/ClientSecret) normally come from workspace admin
 // settings; AccessToken/RefreshToken/ExpiresAt are per data-source user tokens.
 type Config struct {
+	DataSourceID string `json:"-"`
 	BaseURL      string `json:"base_url"`
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
@@ -80,6 +81,7 @@ func parseCanvasConfig(config *types.DataSourceConfig, requireApp bool) (*Config
 	}
 
 	cfg := &Config{
+		DataSourceID: config.RuntimeDataSourceID,
 		BaseURL:      stringCred(creds, "base_url"),
 		ClientID:     stringCred(creds, "client_id"),
 		ClientSecret: stringCred(creds, "client_secret"),
