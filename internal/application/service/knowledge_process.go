@@ -4114,6 +4114,30 @@ func (s *knowledgeService) checkQuotaAndSaveArtifact(
 	size int64,
 	data []byte,
 ) error {
+	// Idempotency for at-least-once redelivery: a re-run of the same attempt
+	// (worker crash after artifacts were saved, asynq retry, re-parse enqueue
+	// with the same attempt) must replace the previous artifact of this type
+	// instead of accumulating duplicate rows and double-charging quota.
+	if s.artifactRepo != nil {
+		if old, err := s.artifactRepo.GetArtifactByType(ctx, tenant.ID, knowledge.ID, attempt, artifactType, nativeKind); err == nil && old != nil {
+			if old.StorageKey != "" {
+				if err := s.fileSvc.DeleteFile(ctx, old.StorageKey); err != nil {
+					logger.Warnf(ctx, "Failed to delete replaced artifact file %s: %v", old.StorageKey, err)
+				}
+			}
+			if _, err := s.artifactRepo.DeleteArtifactByType(ctx, tenant.ID, knowledge.ID, attempt, artifactType, nativeKind); err != nil {
+				logger.Warnf(ctx, "Failed to delete replaced artifact row: %v", err)
+			}
+			if old.Size > 0 {
+				if err := s.tenantRepo.AdjustStorageUsed(ctx, tenant.ID, -old.Size); err != nil {
+					logger.Warnf(ctx, "Failed to refund storage for replaced artifact: %v", err)
+				} else {
+					tenant.StorageUsed -= old.Size
+				}
+			}
+		}
+	}
+
 	if tenant.StorageQuota > 0 && tenant.StorageUsed+size > tenant.StorageQuota {
 		return fmt.Errorf("storage quota exceeded (used %d + needed %d > quota %d)",
 			tenant.StorageUsed, size, tenant.StorageQuota)

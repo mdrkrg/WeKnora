@@ -342,5 +342,6 @@ type KnowledgeArtifactRepository interface {
 	ListArtifacts(ctx context.Context, tenantID uint64, knowledgeID string, attempt int) ([]types.KnowledgeArtifact, error)
 	DeleteArtifactsByKnowledgeID(ctx context.Context, tenantID uint64, knowledgeID string) (int64, error)
 	DeleteArtifactsByAttempt(ctx context.Context, tenantID uint64, knowledgeID string, attempt int) (int64, error)
+	DeleteArtifactByType(ctx context.Context, tenantID uint64, knowledgeID string, attempt int, artifactType, nativeKind string) (int64, error)
 	SetCurrentAttempt(ctx context.Context, knowledgeID string, attempt int) error
 }

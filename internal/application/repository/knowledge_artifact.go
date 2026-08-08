@@ -69,15 +69,15 @@ func (r *knowledgeArtifactRepository) DeleteArtifactsByAttempt(ctx context.Conte
 	return result.RowsAffected, result.Error
 }
 
-func (r *knowledgeArtifactRepository) GetCurrentAttempt(ctx context.Context, tenantID uint64, knowledgeID string) (int, error) {
-	var knowledge types.Knowledge
-	if err := r.db.WithContext(ctx).
-		Select("current_attempt").
-		Where("id = ? AND tenant_id = ?", knowledgeID, tenantID).
-		First(&knowledge).Error; err != nil {
-		return 0, err
+func (r *knowledgeArtifactRepository) DeleteArtifactByType(ctx context.Context, tenantID uint64, knowledgeID string, attempt int, artifactType, nativeKind string) (int64, error) {
+	q := r.db.WithContext(ctx).
+		Where("tenant_id = ? AND knowledge_id = ? AND attempt = ? AND artifact_type = ?",
+			tenantID, knowledgeID, attempt, artifactType)
+	if nativeKind != "" {
+		q = q.Where("native_kind = ?", nativeKind)
 	}
-	return knowledge.CurrentAttempt, nil
+	result := q.Delete(&types.KnowledgeArtifact{})
+	return result.RowsAffected, result.Error
 }
 
 func (r *knowledgeArtifactRepository) SetCurrentAttempt(ctx context.Context, knowledgeID string, attempt int) error {

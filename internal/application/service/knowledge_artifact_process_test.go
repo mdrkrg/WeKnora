@@ -308,3 +308,53 @@ func TestCleanupKnowledgeArtifacts(t *testing.T) {
 		t.Errorf("expected storage refund of -30, got %v", tenantRepo.adjustCalls)
 	}
 }
+
+// TestSaveProcessArtifacts_ReplacesExistingArtifact verifies at-least-once
+// redelivery: re-running the same attempt replaces the previous artifact of
+// the same type (old file deleted, old row removed, quota refunded) instead
+// of accumulating duplicates that double-charge quota.
+func TestSaveProcessArtifacts_ReplacesExistingArtifact(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		existing: &types.KnowledgeArtifact{
+			ID:           "old-md",
+			ArtifactType: types.ArtifactTypeMarkdown,
+			StorageKey:   "local://artifacts/k1/1/markdown",
+			Size:         50,
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 200}
+	ctx := artifactTestContext(tenant)
+
+	knowledge := &types.Knowledge{ID: "k1", TenantID: 10000}
+	result := &types.ReadResult{
+		MarkdownContent: "# hello",
+		Metadata:        map[string]string{"resolved_engine": "mineru"},
+	}
+
+	err := svc.saveProcessArtifacts(ctx, knowledge, 1, result, nil, &types.EffectiveProcessConfig{})
+	if err != nil {
+		t.Fatalf("saveProcessArtifacts returned error: %v", err)
+	}
+
+	if len(fileSvc.deleteCalls) != 1 || fileSvc.deleteCalls[0] != "local://artifacts/k1/1/markdown" {
+		t.Errorf("expected replaced markdown file deletion, got %v", fileSvc.deleteCalls)
+	}
+	if len(artifactRepo.deleteByTypeCalls) != 1 || artifactRepo.deleteByTypeCalls[0] != types.ArtifactTypeMarkdown {
+		t.Errorf("expected DeleteArtifactByType(markdown), got %v", artifactRepo.deleteByTypeCalls)
+	}
+	// -50 refund for the replaced markdown, then +size charges for both saves.
+	if len(tenantRepo.adjustCalls) != 3 || tenantRepo.adjustCalls[0] != -50 {
+		t.Errorf("expected refund -50 then two charges, got %v", tenantRepo.adjustCalls)
+	}
+	if tenant.StorageUsed != 200-50+int64(len(result.MarkdownContent))+2 {
+		t.Errorf("unexpected in-memory storage accounting: %d", tenant.StorageUsed)
+	}
+}
