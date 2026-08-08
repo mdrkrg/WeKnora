@@ -404,6 +404,20 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Router configuration
 	logger.Debugf(ctx, "[Container] Registering router and starting task server...")
 	must(container.Provide(router.NewRouter))
+	// Inject the cross-replica Canvas coordinator after construction: it is
+	// optional (nil falls back to process-local singleflight) and kept out of
+	// the constructor signature to stay merge-friendly with upstream.
+	must(container.Invoke(func(svc interfaces.DataSourceService, rdb *redis.Client) {
+		if ds, ok := svc.(*service.DataSourceService); ok {
+			var coord dsoauth.Coordinator
+			if redisAvailable && rdb != nil {
+				coord = dsoauth.NewRedisCoordinator(rdb)
+			}
+			ds.SetCanvasCoordinator(coord)
+		} else {
+			logger.Warnf(ctx, "[Container] DataSourceService is not a *service.DataSourceService, Canvas distributed coordination disabled")
+		}
+	}))
 	if redisAvailable {
 		must(container.Invoke(router.RunAsynqServer))
 	} else {

@@ -34,6 +34,7 @@ type DataSourceService struct {
 	scheduler         *datasource.Scheduler
 	tenantRepo        interfaces.TenantRepository
 	tagService        interfaces.KnowledgeTagService
+	coordinator       dsoauth.Coordinator
 	audit             interfaces.AuditLogService
 }
 
@@ -62,6 +63,13 @@ func NewDataSourceService(
 		tagService:        tagService,
 		audit:             audit,
 	}
+}
+
+// SetCanvasCoordinator injects the cross-replica coordination used for OAuth
+// refresh locking and distributed rate limiting. It is optional: when nil,
+// connectors fall back to process-local singleflight and rate limiting.
+func (s *DataSourceService) SetCanvasCoordinator(c dsoauth.Coordinator) {
+	s.coordinator = c
 }
 
 // CreateDataSource creates a new data source configuration
@@ -400,6 +408,32 @@ func (s *DataSourceService) attachCredentialPersister(dsID string, config *types
 	config.OnCredentialsUpdated = func(ctx context.Context, credentials map[string]interface{}) error {
 		return s.MergeDataSourceCredentials(ctx, dsID, credentials)
 	}
+	config.OnCredentialsReload = func(ctx context.Context) (map[string]interface{}, error) {
+		existing, err := s.dsRepo.FindByID(ctx, dsID)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := existing.ParseConfig()
+		if err != nil {
+			return nil, err
+		}
+		if parsed == nil || parsed.Credentials == nil {
+			return map[string]interface{}{}, nil
+		}
+		credentials := make(map[string]interface{}, len(parsed.Credentials))
+		for key, value := range parsed.Credentials {
+			credentials[key] = value
+		}
+		return credentials, nil
+	}
+	if s.coordinator != nil {
+		config.AcquireCredentialRefreshLock = func(ctx context.Context) (func(), error) {
+			return s.coordinator.AcquireLock(ctx, dsoauth.CanvasRefreshLockKey(dsID), dsoauth.CanvasRefreshLockTTL)
+		}
+		config.WaitForRateLimit = func(ctx context.Context) error {
+			return s.coordinator.WaitRateLimit(ctx, dsoauth.CanvasRateLimitKey(dsID))
+		}
+	}
 }
 
 // enrichCanvasConfig injects deployment-level Canvas OAuth app credentials
@@ -412,6 +446,7 @@ func (s *DataSourceService) enrichCanvasConfig(ctx context.Context, ds *types.Da
 	if ds == nil || config == nil || ds.Type != types.ConnectorTypeCanvas {
 		return
 	}
+	config.RuntimeDataSourceID = ds.ID
 	app, err := dsoauth.LoadAppCredentials()
 	if err != nil {
 		logger.Warnf(ctx, "failed to load Canvas OAuth app credentials: %v", err)
