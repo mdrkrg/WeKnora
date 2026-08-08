@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"testing"
@@ -562,5 +563,19 @@ func TestListArtifacts_ReturnsMappedItems(t *testing.T) {
 	native := result[1]
 	if native.ArtifactType != types.ArtifactTypeEngineNative || native.NativeKind != "mineru" || native.Size != 20 {
 		t.Errorf("unexpected engine_native item: %+v", native)
+	}
+}
+
+// TestIsQuotaExceededError verifies the artifact-save error classifier
+// distinguishes deterministic quota failures from transient ones.
+func TestIsQuotaExceededError(t *testing.T) {
+	if !isQuotaExceededError(fmt.Errorf("storage quota exceeded (used 100 + needed 50 > quota 120)")) {
+		t.Error("expected quota-exceeded error to classify as permanent")
+	}
+	if isQuotaExceededError(fmt.Errorf("save artifact bytes: connection refused")) {
+		t.Error("expected transient storage error NOT to classify as permanent")
+	}
+	if isQuotaExceededError(nil) {
+		t.Error("expected nil error to classify as retryable/not permanent")
 	}
 }

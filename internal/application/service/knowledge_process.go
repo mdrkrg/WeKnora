@@ -3524,6 +3524,12 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		// Remove partial artifacts written before the failure so they neither
 		// leak quota nor occupy the attempt number of a future successful parse.
 		s.cleanupFailedAttempt(ctx, knowledge, attempt)
+		// Quota failures are deterministic — retrying cannot succeed, so fail
+		// permanently. Transient storage/IO failures are returned to asynq for
+		// retry and only mark the parse failed on the last attempt.
+		if !isQuotaExceededError(err) && !isLastRetry {
+			return err
+		}
 		knowledge.ParseStatus = "failed"
 		knowledge.ErrorMessage = err.Error()
 		knowledge.UpdatedAt = time.Now()
@@ -3774,6 +3780,12 @@ func isLikelyRateLimitError(err error) bool {
 		}
 	}
 	return false
+}
+
+// isQuotaExceededError reports whether an artifact-save error is the
+// deterministic storage-quota failure, which retrying cannot fix.
+func isQuotaExceededError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "storage quota exceeded")
 }
 
 // Returns nil when the required service is unavailable.
