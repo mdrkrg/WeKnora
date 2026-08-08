@@ -22,6 +22,7 @@ import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '@/stores/auth';
 import DocumentPreview from '@/components/document-preview.vue';
 import KnowledgeProcessingTimeline from '@/components/knowledge-processing-timeline.vue';
+import KnowledgeArtifacts from '@/components/knowledge-artifacts.vue';
 
 const { t } = useI18n();
 const authStore = useAuthStore();
@@ -509,9 +510,9 @@ const docMarkdownRoot = ref<HTMLElement | null>(null)
 const getMarkdownRenderRoot = (): ParentNode | null =>
   docMarkdownRoot.value ?? (mdContentWrap.value as ParentNode | null) ?? null
 let url = ref('')
-// 视图模式：chunks / merged / preview
+// 视图模式：chunks / merged / preview / artifact
 // file 类型默认「预览」，URL / 手动创建 默认「全文」
-const viewMode = ref<'chunks' | 'merged' | 'preview'>('merged');
+const viewMode = ref<'chunks' | 'merged' | 'preview' | 'artifact'>('merged');
 
 // 合并后的文档内容（在下方通过 computed 定义）
 
@@ -1826,7 +1827,9 @@ const handleDetailsScroll = () => {
         <section class="setting-drawer__section doc-content-section">
           <div class="doc-content-section-head">
             <div class="doc-content-section-head-left">
-              <h4 class="setting-drawer__section-title">{{ getContentLabel() }}</h4>
+              <h4 class="setting-drawer__section-title">
+                {{ viewMode === 'artifact' ? $t('knowledgeBase.artifactTab') : getContentLabel() }}
+              </h4>
               <span v-if="details.total > 0" class="chunk-count">
                 {{ $t('knowledgeBase.chunkCount', { count: details.total }) }}
               </span>
@@ -1846,6 +1849,11 @@ const handleDetailsScroll = () => {
                 :theme="viewMode === 'chunks' ? 'primary' : 'default'" @click="viewMode = 'chunks'"
                 class="view-mode-btn">
                 {{ $t('knowledgeBase.viewChunks') }}
+              </t-button>
+              <t-button size="small" :variant="viewMode === 'artifact' ? 'base' : 'outline'"
+                :theme="viewMode === 'artifact' ? 'primary' : 'default'" @click="viewMode = 'artifact'"
+                class="view-mode-btn">
+                {{ $t('knowledgeBase.artifactTab') }}
               </t-button>
             </div>
           </div>
@@ -2128,6 +2136,11 @@ const handleDetailsScroll = () => {
           <div v-else-if="viewMode === 'preview'">
             <DocumentPreview :knowledgeId="details.id" :fileType="details.file_type" :fileName="details.title"
               :active="viewMode === 'preview'" />
+          </div>
+
+          <!-- 解析产物视图（懒挂载：切换到此 tab 才请求） -->
+          <div v-else-if="viewMode === 'artifact'">
+            <KnowledgeArtifacts v-if="details.id" :knowledge-id="details.id" />
           </div>
         </section>
       </div>
