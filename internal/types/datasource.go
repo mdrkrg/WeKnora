@@ -1,6 +1,7 @@
 package types
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"strings"
@@ -36,6 +37,7 @@ const (
 	ConnectorTypeSlack       = "slack"
 	ConnectorTypeIMAP        = "imap"
 	ConnectorTypeRSS         = "rss"
+	ConnectorTypeCanvas      = "canvas"
 
 	// Sync modes
 	SyncModeIncremental = "incremental"
@@ -233,6 +235,10 @@ type DataSourceConfig struct {
 	// ingesting an image into a KB without VLM is rejected, so image extraction is
 	// skipped when this is false.
 	MultimodalEnabled bool `json:"-"`
+
+	// OnCredentialsUpdated is an optional runtime hook (not persisted) invoked
+	// when a connector refreshes OAuth tokens and needs them written back.
+	OnCredentialsUpdated func(ctx context.Context, credentials map[string]interface{}) error `json:"-"`
 }
 
 // HasCredentials reports whether the credentials map carries any value at
@@ -257,9 +263,23 @@ func (d DataSourceConfig) HasConfiguredCredentials(connectorType string) bool {
 		}
 		s, ok := raw.(string)
 		return ok && strings.TrimSpace(s) != ""
+	case ConnectorTypeCanvas:
+		// Per-user OAuth completion: access_token present means authorized.
+		token := strings.TrimSpace(fmtString(d.Credentials["access_token"]))
+		return token != ""
 	default:
 		return len(d.Credentials) > 0
 	}
+}
+
+func fmtString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // StripNonSecretCredentials removes non-secret values mistakenly stored in the
@@ -271,6 +291,14 @@ func (d *DataSourceConfig) StripNonSecretCredentials(connectorType string) {
 	switch connectorType {
 	case ConnectorTypeRSS:
 		delete(d.Credentials, "feed_urls")
+		if len(d.Credentials) == 0 {
+			d.Credentials = nil
+		}
+	case ConnectorTypeCanvas:
+		// App credentials live on the tenant; never persist them on the DS row.
+		delete(d.Credentials, "base_url")
+		delete(d.Credentials, "client_id")
+		delete(d.Credentials, "client_secret")
 		if len(d.Credentials) == 0 {
 			d.Credentials = nil
 		}

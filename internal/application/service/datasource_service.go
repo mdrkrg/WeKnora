@@ -319,6 +319,49 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 	return nil
 }
 
+// MergeDataSourceCredentials patches credential keys onto the existing map.
+// Empty-string values delete the key. Does not run live connector validation
+// (used by OAuth token write-back / refresh).
+func (s *DataSourceService) MergeDataSourceCredentials(
+	ctx context.Context, id string, patch map[string]interface{},
+) error {
+	if id == "" {
+		return datasource.ErrDataSourceInvalid
+	}
+	existing, err := s.dsRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	parsed, err := existing.ParseConfig()
+	if err != nil {
+		return err
+	}
+	if parsed == nil {
+		parsed = &types.DataSourceConfig{Type: existing.Type}
+	}
+	if parsed.Credentials == nil {
+		parsed.Credentials = map[string]interface{}{}
+	}
+	for k, v := range patch {
+		if s, ok := v.(string); ok && s == "" {
+			delete(parsed.Credentials, k)
+			continue
+		}
+		parsed.Credentials[k] = v
+	}
+	parsed.StripNonSecretCredentials(existing.Type)
+	blob, err := parsed.ToJSON()
+	if err != nil {
+		return err
+	}
+	existing.Config = blob
+	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		return err
+	}
+	logger.Infof(ctx, "DataSource credentials merged: id=%s", secutils.SanitizeForLog(id))
+	return nil
+}
+
 // DeleteDataSource deletes a data source (soft delete)
 func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) error {
 	// Verify data source exists
