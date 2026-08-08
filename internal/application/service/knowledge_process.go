@@ -257,10 +257,13 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	}
 
 	// Check if knowledge is being deleted/cancelled before processing.
-	// Both statuses short-circuit identically here — there's nothing to clean
-	// up yet so the branch is purely "stop early".
+	// Both statuses short-circuit identically here — the branch is "stop
+	// early", but the parse artifacts saved before processChunks must not
+	// linger as uncommitted leftovers (delete flow covers the deleting
+	// case; cancelled needs the cleanup).
 	if aborted, status := s.isKnowledgeAborted(ctx, knowledge.TenantID, knowledge.ID); aborted {
 		logger.Infof(ctx, "Knowledge aborted (%s), skipping chunk processing: %s", status, knowledge.ID)
+		s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 		return
 	}
 
@@ -271,6 +274,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		embeddingModel, err = s.modelService.GetEmbeddingModel(ctx, kb.EmbeddingModelID)
 		if err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks get embedding model failed")
+			s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 			return
 		}
 	} else {
@@ -472,9 +476,11 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	}
 
 	// Check if knowledge is being deleted/cancelled before writing chunks.
-	// Nothing has been persisted yet, so both branches just bail.
+	// Nothing has been persisted yet, so both branches just bail — except
+	// the parse artifacts saved before processChunks must not linger.
 	if aborted, status := s.isKnowledgeAborted(ctx, knowledge.TenantID, knowledge.ID); aborted {
 		logger.Infof(ctx, "Knowledge aborted (%s), skipping chunk write: %s", status, knowledge.ID)
+		s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 		return
 	}
 
@@ -491,6 +497,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		s.repo.UpdateKnowledge(ctx, knowledge)
 		s.failStage(ctx, knowledge.ID, types.StageChunking,
 			werrors.ErrCodeChunkingFailed, "create chunks failed", err)
+		s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 		return
 	}
 	totalChunkChars := 0
@@ -546,6 +553,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 				knowledge.ErrorMessage = err.Error()
 				knowledge.UpdatedAt = time.Now()
 				s.repo.UpdateKnowledge(ctx, knowledge)
+				s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 				return
 			}
 			// Check if there's enough storage quota available
@@ -554,6 +562,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 				knowledge.ErrorMessage = "存储空间不足"
 				knowledge.UpdatedAt = time.Now()
 				s.repo.UpdateKnowledge(ctx, knowledge)
+				s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 				return
 			}
 		}
@@ -568,6 +577,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 					logger.Warnf(ctx, "Failed to cleanup chunks after deletion detected: %v", err)
 				}
 			}
+			s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 			return
 		}
 
@@ -597,6 +607,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 			}
 			s.failStage(ctx, knowledge.ID, types.StageEmbedding,
 				code, "batch index failed", err)
+			s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 			return
 		}
 		logger.GetLogger(ctx).Infof("processChunks batch index successfully, with %d index", len(indexInfoList))
@@ -619,6 +630,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 					logger.Warnf(ctx, "Failed to cleanup index after deletion detected: %v", err)
 				}
 			}
+			s.cleanupFailedAttempt(ctx, knowledge, attemptFromCtx(ctx))
 			return
 		}
 	} else {
@@ -643,12 +655,16 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks update knowledge failed")
-	} else if options.CommitArtifactAttempt {
+	}
+	if options.CommitArtifactAttempt {
 		// The document parse (extraction, image resolution, chunking, indexing)
 		// succeeded at this point. Advance the artifact pointer and prune stale
 		// attempts: downstream enrichment subtasks (summary, question, graph)
 		// never invalidate artifacts, so a failure there must neither promote a
 		// partial attempt nor evict the previous successful version.
+		// The commit is deliberately independent of the status write above: a
+		// transient UpdateKnowledge failure must not strand the artifacts of a
+		// successful parse (no asynq retry would re-attempt the commit).
 		// maybeCommitArtifactAttempt also guards against a stale task whose
 		// attempt was superseded by a newer parse between its entry check and
 		// this point — a stale commit would regress the pointer.
@@ -4163,7 +4179,27 @@ func (s *knowledgeService) maybeCommitArtifactAttempt(ctx context.Context, knowl
 // retention window. No-op when the attempt already committed or was
 // superseded by a later commit.
 func (s *knowledgeService) cleanupFailedAttempt(ctx context.Context, knowledge *types.Knowledge, attempt int) {
-	if s.artifactRepo == nil || attempt <= 0 || knowledge.CurrentAttempt >= attempt {
+	if s.artifactRepo == nil || attempt <= 0 {
+		return
+	}
+	// The in-memory knowledge.CurrentAttempt can be stale when a duplicate
+	// redelivery of the same attempt fails after its twin already committed
+	// (at-least-once asynq semantics) — the guard below must never delete
+	// committed artifacts. Re-read the committed pointer and keep the max;
+	// on read error, skip the cleanup entirely rather than risk deleting
+	// committed artifacts based on a stale pointer.
+	committedCurrent := knowledge.CurrentAttempt
+	if s.repo != nil {
+		fresh, err := s.repo.GetKnowledgeByID(ctx, knowledge.TenantID, knowledge.ID)
+		if err != nil {
+			logger.Warnf(ctx, "Failed to re-read committed attempt for knowledge %s, skipping failed-attempt cleanup: %v", knowledge.ID, err)
+			return
+		}
+		if fresh != nil && fresh.CurrentAttempt > committedCurrent {
+			committedCurrent = fresh.CurrentAttempt
+		}
+	}
+	if committedCurrent >= attempt {
 		return
 	}
 	tenantID, ok := types.TenantIDFromContext(ctx)

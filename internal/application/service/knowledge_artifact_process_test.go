@@ -677,3 +677,75 @@ func TestMaybeCommitArtifactAttempt_AttemptZeroIsNeverSuperseded(t *testing.T) {
 		t.Errorf("expected no cleanup for attempt 0, got %v", artifactRepo.deleteByAttemptCalls)
 	}
 }
+
+// TestCleanupFailedAttempt_RefreshesCommittedGuard verifies the cleanup re-reads
+// the committed attempt pointer instead of trusting a stale in-memory value:
+// a duplicate redelivery of attempt 3 that fails after attempt 3 already
+// committed must NOT delete the committed artifacts.
+func TestCleanupFailedAttempt_RefreshesCommittedGuard(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			3: {{ID: "committed", StorageKey: "local://artifacts/k1/3/markdown", Size: 10}},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		repo: &artifactListKnowledgeRepo{
+			knowledge: &types.Knowledge{ID: "k1", TenantID: 10000, CurrentAttempt: 3},
+		},
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 100}
+	ctx := artifactTestContext(tenant)
+	// In-memory pointer is stale (attempt 2); the row already committed 3.
+	knowledge := &types.Knowledge{ID: "k1", TenantID: 10000, CurrentAttempt: 2}
+
+	svc.cleanupFailedAttempt(ctx, knowledge, 3)
+
+	if len(artifactRepo.deleteByAttemptCalls) != 0 {
+		t.Errorf("expected NO deletion of committed attempt 3, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if len(fileSvc.deleteCalls) != 0 {
+		t.Errorf("expected NO file deletion of committed attempt 3, got %v", fileSvc.deleteCalls)
+	}
+	if tenant.StorageUsed != 100 {
+		t.Errorf("expected StorageUsed unchanged, got %d", tenant.StorageUsed)
+	}
+}
+
+// TestCleanupFailedAttempt_KeepsMaxOfInMemoryAndFresh verifies the guard takes
+// the max of the in-memory and freshly read pointers.
+func TestCleanupFailedAttempt_KeepsMaxOfInMemoryAndFresh(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			3: {{ID: "leftover", StorageKey: "local://artifacts/k1/3/markdown", Size: 10}},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		repo: &artifactListKnowledgeRepo{
+			knowledge: &types.Knowledge{ID: "k1", TenantID: 10000, CurrentAttempt: 1},
+		},
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 100}
+	ctx := artifactTestContext(tenant)
+	// In-memory pointer (2) is higher than the fresh row (1): max is 2 < 3,
+	// so the uncommitted attempt 3 must still be cleaned.
+	knowledge := &types.Knowledge{ID: "k1", TenantID: 10000, CurrentAttempt: 2}
+
+	svc.cleanupFailedAttempt(ctx, knowledge, 3)
+
+	if len(artifactRepo.deleteByAttemptCalls) != 1 || artifactRepo.deleteByAttemptCalls[0] != 3 {
+		t.Errorf("expected cleanup of uncommitted attempt 3, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if tenant.StorageUsed != 90 {
+		t.Errorf("expected refunded StorageUsed=90, got %d", tenant.StorageUsed)
+	}
+}
