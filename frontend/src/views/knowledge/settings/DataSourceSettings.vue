@@ -14,10 +14,14 @@ import { humanizeCron, relativeTime } from '@/utils/cronHumanize'
 import DataSourceEditorDialog from './DataSourceEditorDialog.vue'
 import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
+import type { DataSourceSyncStartedEvent } from './dataSourceSyncMonitor'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ kbId: string }>()
-const emit = defineEmits<{ (e: 'count', value: number): void }>()
+const emit = defineEmits<{
+  (e: 'count', value: number): void
+  (e: 'sync-started', value: DataSourceSyncStartedEvent): void
+}>()
 const { t } = useI18n()
 const authStore = useAuthStore()
 
@@ -34,6 +38,7 @@ const logsVisible = ref(false)
 const logsDsId = ref('')
 const logsDsName = ref('')
 const pollTimer = ref<number | null>(null)
+let disposed = false
 
 function stopPolling() {
   if (pollTimer.value !== null) {
@@ -42,11 +47,12 @@ function stopPolling() {
   }
 }
 
-function schedulePolling() {
+function schedulePolling(delayMs: number) {
+  if (disposed) return
   stopPolling()
   pollTimer.value = window.setTimeout(() => {
-    loadList(true)
-  }, 3000)
+    void loadList(true)
+  }, delayMs)
 }
 
 async function loadList(silent = false) {
@@ -57,13 +63,10 @@ async function loadList(silent = false) {
     emit('count', dataSources.value.length)
 
     const hasRunningSync = dataSources.value.some(ds => ds.latest_sync_log?.status === 'running')
-    if (hasRunningSync) {
-      schedulePolling()
-    } else {
-      stopPolling()
-    }
+    schedulePolling(hasRunningSync ? 3000 : 10000)
   } catch (e: any) {
     console.error(e)
+    schedulePolling(10000)
   } finally {
     if (!silent) loading.value = false
   }
@@ -97,7 +100,15 @@ async function removeDataSource(ds: DataSource) {
 
 async function handleSync(ds: DataSource) {
   try {
-    await triggerSync(ds.id)
+    const response: any = await triggerSync(ds.id)
+    const syncLog = response?.data || response
+    if (syncLog?.id) {
+      emit('sync-started', {
+        kbId: props.kbId,
+        dataSourceId: ds.id,
+        syncLogId: syncLog.id,
+      })
+    }
     MessagePlugin.success(t('datasource.syncTriggered'))
     await loadList(true)
   } catch (e: any) {
@@ -172,13 +183,24 @@ function isSyncRunning(ds: DataSource) {
   return ds.latest_sync_log?.status === 'running'
 }
 
-function onEditorSaved() {
+function onEditorSaved(event: DataSourceSyncStartedEvent | null) {
   editorVisible.value = false
+  if (event) emit('sync-started', event)
   loadList()
 }
 
-onMounted(loadList)
-onBeforeUnmount(stopPolling)
+function onEditorDiscarded() {
+  loadList(true)
+}
+
+onMounted(() => {
+  disposed = false
+  void loadList()
+})
+onBeforeUnmount(() => {
+  disposed = true
+  stopPolling()
+})
 </script>
 
 <template>
@@ -329,6 +351,7 @@ onBeforeUnmount(stopPolling)
       :kb-id="kbId"
       :data-source="editingDs"
       @saved="onEditorSaved"
+      @discarded="onEditorDiscarded"
     />
 
     <DataSourceSyncLogs

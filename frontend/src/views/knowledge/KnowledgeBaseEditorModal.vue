@@ -416,7 +416,11 @@
 
                 <!-- 数据源管理（仅编辑模式） -->
                 <div v-if="editorMode === 'edit' && activeKbId && currentSection === 'datasource'" class="section">
-                  <DataSourceSettings :kb-id="activeKbId" @count="dsCount = $event" />
+                  <DataSourceSettings
+                    :kb-id="activeKbId"
+                    @count="dsCount = $event"
+                    @sync-started="emit('data-source-sync-started', $event)"
+                  />
                 </div>
 
                 <!-- 共享设置（仅编辑模式） -->
@@ -482,6 +486,7 @@ import GraphSettings from './settings/GraphSettings.vue'
 import KBShareSettings from './settings/KBShareSettings.vue'
 import DataSourceSettings from './settings/DataSourceSettings.vue'
 import KnowledgeBaseActivitySettings from './settings/KnowledgeBaseActivitySettings.vue'
+import type { DataSourceSyncStartedEvent } from './settings/dataSourceSyncMonitor'
 import { useI18n } from 'vue-i18n'
 
 const uiStore = useUIStore()
@@ -502,6 +507,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void
   (e: 'success', kbId: string): void
+  (e: 'data-source-sync-started', value: DataSourceSyncStartedEvent): void
 }>()
 
 /** 首次保存创建成功后留在弹窗内，继续配置共享等设置 */

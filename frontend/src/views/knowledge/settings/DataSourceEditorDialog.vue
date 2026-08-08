@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import {
@@ -25,6 +25,12 @@ import { useUIStore } from '@/stores/ui'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import { getDatasourceIconUrl } from './datasourceIcons'
+import { deleteTemporaryDataSourceDraft } from './dataSourceDraftLifecycle'
+import {
+  dataSourceErrorMessage,
+  isCanvasAuthorizationError,
+} from './dataSourceResourceErrors'
+import type { DataSourceSyncStartedEvent } from './dataSourceSyncMonitor'
 
 const props = defineProps<{
   kbId: string
@@ -32,7 +38,10 @@ const props = defineProps<{
 }>()
 
 const visible = defineModel<boolean>('visible', { default: false })
-const emit = defineEmits<{ saved: [] }>()
+const emit = defineEmits<{
+  saved: [event: DataSourceSyncStartedEvent | null]
+  discarded: []
+}>()
 const { t } = useI18n()
 const uiStore = useUIStore()
 
@@ -191,6 +200,8 @@ const form = ref({
 // Step 2: Resources
 const resources = ref<Resource[]>([])
 const loadingResources = ref(false)
+const resourceLoadError = ref('')
+const resourceAuthorizationExpired = ref(false)
 const selectedResourceIds = ref<string[]>([])
 const expandedResourceIds = ref(new Set<string>())
 // Lazy loading: parents whose children have already been fetched, and parents
@@ -458,6 +469,36 @@ const prereqExpanded = ref(false)
 
 // Temp data source for resource listing
 const tempDsId = ref('')
+const draftCommitted = ref(false)
+let draftCleanupInFlight: Promise<void> | null = null
+
+async function cleanupTemporaryDataSource() {
+  if (draftCleanupInFlight) {
+    await draftCleanupInFlight
+    return
+  }
+  draftCleanupInFlight = (async () => {
+    const deletedId = await deleteTemporaryDataSourceDraft(
+      {
+        isEdit: isEdit.value,
+        tempDsId: tempDsId.value,
+        isCommitted: draftCommitted.value,
+      },
+      deleteDataSource,
+    )
+    if (deletedId && tempDsId.value === deletedId) {
+      tempDsId.value = ''
+      emit('discarded')
+    }
+  })()
+  try {
+    await draftCleanupInFlight
+  } catch (error) {
+    console.warn('[DataSource] failed to clean up temporary draft', error)
+  } finally {
+    draftCleanupInFlight = null
+  }
+}
 
 // Schedule presets
 const schedulePresets = computed(() => [
@@ -622,23 +663,20 @@ const currentDef = computed(() => connectorDefs.value.find(d => d.type === form.
 // --- Drawer lifecycle ---
 watch(visible, async (v) => {
   if (!v) {
-    if (!isEdit.value && tempDsId.value) {
-      try {
-        await deleteDataSource(tempDsId.value)
-      } catch {
-        // Ignore cleanup errors
-      }
-      tempDsId.value = ''
-    }
+    stopCanvasOAuthPolling(true)
+    await cleanupTemporaryDataSource()
     return
   }
   step.value = isEdit.value ? 1 : 0
   testResult.value = ''
   testErrorMsg.value = ''
   tempDsId.value = ''
+  draftCommitted.value = false
   prereqExpanded.value = false
   pendingRemoveCredentials.value = false
   resources.value = []
+  resourceLoadError.value = ''
+  resourceAuthorizationExpired.value = false
   selectedResourceIds.value = []
   expandedResourceIds.value = new Set()
   loadedChildrenIds.value = new Set()
@@ -812,6 +850,9 @@ async function testConnection() {
 // --- Load resources ---
 async function loadResources() {
   loadingResources.value = true
+  resourceLoadError.value = ''
+  resourceAuthorizationExpired.value = false
+  resources.value = []
   try {
     if (!tempDsId.value) {
       const res = await createDataSource({
@@ -856,9 +897,21 @@ async function loadResources() {
       if (hidden.length > 0) void revealExistingSelections(hidden)
     }
   } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.resourceLoadFailed'))
+    const message = dataSourceErrorMessage(e) || t('datasource.resourceLoadFailed')
+    resourceLoadError.value = message
+    resourceAuthorizationExpired.value = isCanvasAuthorizationError(form.value.type, e)
+    if (resourceAuthorizationExpired.value) {
+      oauthAuthorized.value = false
+      testResult.value = 'error'
+      testErrorMsg.value = t('datasource.oauthExpired')
+    }
+    MessagePlugin.error(message)
   }
   loadingResources.value = false
+}
+
+function returnToCanvasAuthorization() {
+  step.value = 1
 }
 
 // revealExistingSelections asks the backend which ancestors must be expanded to
@@ -1021,6 +1074,20 @@ async function nextStep() {
 const oauthAuthorized = ref(false)
 const oauthAuthorizing = ref(false)
 const oauthChecking = ref(false)
+const oauthPollTimer = ref<number | null>(null)
+const oauthPopup = ref<Window | null>(null)
+
+function stopCanvasOAuthPolling(closePopup = false) {
+  if (oauthPollTimer.value !== null) {
+    window.clearInterval(oauthPollTimer.value)
+    oauthPollTimer.value = null
+  }
+  if (closePopup && oauthPopup.value && !oauthPopup.value.closed) {
+    oauthPopup.value.close()
+  }
+  oauthPopup.value = null
+  oauthAuthorizing.value = false
+}
 
 async function refreshOAuthStatus(dsId?: string) {
   const id = dsId || tempDsId.value
@@ -1069,6 +1136,8 @@ async function authorizeCanvasOAuth() {
   if (!validateStep1Fields()) return
   oauthAuthorizing.value = true
   try {
+    stopCanvasOAuthPolling(true)
+    oauthAuthorizing.value = true
     const dsId = await ensureCanvasDataSource()
     if (!dsId) {
       oauthAuthorizing.value = false
@@ -1085,7 +1154,8 @@ async function authorizeCanvasOAuth() {
       return
     }
     const popup = window.open(authUrl, 'ds_oauth', 'width=720,height=800')
-    const timer = window.setInterval(async () => {
+    oauthPopup.value = popup
+    oauthPollTimer.value = window.setInterval(async () => {
       const closed = !popup || popup.closed
       try {
         oauthAuthorized.value = await getDataSourceOAuthStatus(dsId)
@@ -1093,8 +1163,7 @@ async function authorizeCanvasOAuth() {
         /* ignore poll errors */
       }
       if (oauthAuthorized.value || closed) {
-        window.clearInterval(timer)
-        oauthAuthorizing.value = false
+        stopCanvasOAuthPolling(oauthAuthorized.value)
         if (oauthAuthorized.value) {
           testResult.value = 'success'
           MessagePlugin.success(t('datasource.oauthAuthorizedToast'))
@@ -1183,6 +1252,7 @@ async function handleSubmit() {
   submitting.value = true
   try {
     let dataSourceId = tempDsId.value
+    let syncStartedEvent: DataSourceSyncStartedEvent | null = null
 
     if (tempDsId.value) {
       // Commit credential replacement BEFORE the main PUT so a validation
@@ -1215,18 +1285,26 @@ async function handleSubmit() {
       MessagePlugin.warning(t('datasource.updateSuccessSyncHint'))
     } else {
       try {
-        await triggerSync(dataSourceId)
+        const response: any = await triggerSync(dataSourceId)
+        const syncLog = response?.data || response
+        if (syncLog?.id) {
+          syncStartedEvent = {
+            kbId: props.kbId,
+            dataSourceId,
+            syncLogId: syncLog.id,
+          }
+        }
         MessagePlugin.success(t('datasource.createAndSyncSuccess'))
       } catch (e: any) {
         MessagePlugin.warning(e?.message || e?.error || t('datasource.createButSyncFailed'))
       }
     }
 
-    emit('saved')
-    // Clear before close — otherwise the visible watcher treats the just-saved
-    // row as an abandoned temp draft and DELETEs it (loadResources creates the
-    // row early at step 2 with tempDsId).
+    // Commit before notifying the parent: the saved event closes the drawer
+    // synchronously, and its close watcher must never see this row as a draft.
+    draftCommitted.value = true
     tempDsId.value = ''
+    emit('saved', syncStartedEvent)
     visible.value = false
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.saveFailed'))
@@ -1234,9 +1312,16 @@ async function handleSubmit() {
   submitting.value = false
 }
 
-function handleClose() {
+async function handleClose() {
+  stopCanvasOAuthPolling(true)
+  await cleanupTemporaryDataSource()
   visible.value = false
 }
+
+onBeforeUnmount(() => {
+  stopCanvasOAuthPolling(true)
+  void cleanupTemporaryDataSource()
+})
 
 async function handleDrawerConfirm() {
   if (step.value === 1 || step.value === 2) {
@@ -1708,7 +1793,6 @@ const drawerConfirmText = computed(() => {
     <section v-if="step === 2" class="setting-drawer__section ds-resource-section">
       <h4 class="setting-drawer__section-title">{{ t('datasource.step.resources') }}</h4>
       <p class="ds-resource-hint">{{ t('datasource.resourceHint') }}</p>
-
       <!-- Drive (云盘) root input: shown alongside the tree (not as a switch).
            The user supplies a folder_token (or a Drive folder URL) and clicks
            "load"; the tree below stays as a placeholder until load succeeds.
@@ -1748,6 +1832,28 @@ const drawerConfirmText = computed(() => {
       </div>
 
       <div v-else-if="loadingResources" class="ds-loading-center"><t-loading /></div>
+      <div v-else-if="resourceLoadError" class="ds-resource-empty">
+        <t-icon name="error-circle" size="32px" style="color: var(--td-error-color); margin-bottom: 8px;" />
+        <p class="ds-empty-title">
+          {{ resourceAuthorizationExpired ? t('datasource.oauthExpired') : t('datasource.resourceLoadFailed') }}
+        </p>
+        <p class="ds-empty-desc">
+          {{ resourceAuthorizationExpired ? t('datasource.oauthExpiredDesc') : resourceLoadError }}
+        </p>
+        <div class="ds-empty-actions">
+          <button
+            v-if="resourceAuthorizationExpired"
+            type="button"
+            class="ds-empty-retry"
+            @click="returnToCanvasAuthorization"
+          >
+            {{ t('datasource.returnToReauthorize') }}
+          </button>
+          <button v-else type="button" class="ds-empty-retry" @click="loadResources">
+            {{ t('datasource.retryLoadResources') }}
+          </button>
+        </div>
+      </div>
       <div v-else-if="resources.length > 0" class="resource-picker">
         <div class="resource-picker__toolbar">
           <span class="resource-picker__count">
