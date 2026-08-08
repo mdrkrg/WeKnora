@@ -3521,6 +3521,9 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 
 	if err := s.saveProcessArtifacts(ctx, knowledge, attempt, convertResult, storedImages, &eff); err != nil {
 		logger.Errorf(ctx, "Failed to save canonical artifacts for knowledge %s: %v", knowledge.ID, err)
+		// Remove partial artifacts written before the failure so they neither
+		// leak quota nor occupy the attempt number of a future successful parse.
+		s.cleanupFailedAttempt(ctx, knowledge, attempt)
 		knowledge.ParseStatus = "failed"
 		knowledge.ErrorMessage = err.Error()
 		knowledge.UpdatedAt = time.Now()
@@ -4047,15 +4050,19 @@ func (s *knowledgeService) saveProcessArtifacts(
 }
 
 // commitCurrentAttempt advances the artifact pointer after a parse attempt has
-// fully succeeded (extraction, image resolution, chunking and indexing). It also
-// prunes artifacts of attempts older than current-1, keeping the current and
-// previous successful versions. Running it only on the success path means a
-// failed attempt can never become the readable "current" version, nor evict the
-// previous successful one.
+// fully succeeded (extraction, image resolution, chunking and indexing). It
+// also prunes artifacts of attempts strictly older than the previously
+// committed attempt, keeping the new version and the previous successful one.
+// Attempt numbers are allocated sequentially even when an attempt fails, so
+// the keep window must derive from the committed pointer rather than the new
+// attempt number: a failed attempt N followed by success N+1 must not evict
+// the readable N-1 version. Failed attempts' leftovers are cleaned by
+// cleanupFailedAttempt at failure time.
 func (s *knowledgeService) commitCurrentAttempt(ctx context.Context, knowledge *types.Knowledge, attempt int) {
 	if s.artifactRepo == nil || attempt <= 0 {
 		return
 	}
+	prevCurrent := knowledge.CurrentAttempt
 	if err := s.artifactRepo.SetCurrentAttempt(ctx, knowledge.ID, attempt); err != nil {
 		logger.Warnf(ctx, "Failed to set current_attempt on knowledge %s: %v", knowledge.ID, err)
 		return
@@ -4067,9 +4074,10 @@ func (s *knowledgeService) commitCurrentAttempt(ctx context.Context, knowledge *
 		return
 	}
 
-	// Retention: delete artifacts for attempts older than (current - 1).
-	// Keep the current attempt + the previous successful attempt.
-	oldestToKeep := attempt - 1
+	// Retention: delete artifacts of attempts strictly older than the
+	// previously committed attempt (prevCurrent). Keep the new attempt and
+	// the previous successful version.
+	oldestToKeep := prevCurrent
 	if oldestToKeep < 1 {
 		oldestToKeep = 1
 	}
@@ -4100,6 +4108,55 @@ func (s *knowledgeService) commitCurrentAttempt(ctx context.Context, knowledge *
 				if tenantInfo.StorageUsed < 0 {
 					tenantInfo.StorageUsed = 0
 				}
+			}
+		}
+	}
+}
+
+// cleanupFailedAttempt best-effort removes artifacts left behind by a parse
+// attempt that never committed (attempt > committed current). Partial saves
+// (e.g. markdown stored, image_manifest quota-check failure) would otherwise
+// leak quota indefinitely and, by occupying the attempt number, confuse the
+// retention window. No-op when the attempt already committed or was
+// superseded by a later commit.
+func (s *knowledgeService) cleanupFailedAttempt(ctx context.Context, knowledge *types.Knowledge, attempt int) {
+	if s.artifactRepo == nil || attempt <= 0 || knowledge.CurrentAttempt >= attempt {
+		return
+	}
+	tenantID, ok := types.TenantIDFromContext(ctx)
+	if !ok {
+		return
+	}
+
+	artifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantID, knowledge.ID, attempt)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to list artifacts of failed attempt %d: %v", attempt, err)
+		return
+	}
+	if len(artifacts) == 0 {
+		return
+	}
+
+	var totalSize int64
+	for _, a := range artifacts {
+		if a.StorageKey != "" {
+			if err := s.fileSvc.DeleteFile(ctx, a.StorageKey); err != nil {
+				logger.Warnf(ctx, "Failed to delete artifact file %s: %v", a.StorageKey, err)
+			}
+		}
+		totalSize += a.Size
+	}
+	if _, err := s.artifactRepo.DeleteArtifactsByAttempt(ctx, tenantID, knowledge.ID, attempt); err != nil {
+		logger.Warnf(ctx, "Failed to delete artifact rows of failed attempt %d: %v", attempt, err)
+		return
+	}
+	if totalSize > 0 {
+		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantID, -totalSize); err != nil {
+			logger.Warnf(ctx, "Failed to adjust storage for failed attempt cleanup: %v", err)
+		} else if tenantInfo, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok && tenantInfo != nil {
+			tenantInfo.StorageUsed -= totalSize
+			if tenantInfo.StorageUsed < 0 {
+				tenantInfo.StorageUsed = 0
 			}
 		}
 	}

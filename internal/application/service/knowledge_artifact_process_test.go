@@ -188,8 +188,8 @@ func TestSaveProcessArtifacts_ValidAttempt(t *testing.T) {
 }
 
 // TestCommitCurrentAttempt_AdvancesAndPrunes verifies that a successful
-// parse advances the artifact pointer and prunes attempts older than
-// current-1, refunding their quota.
+// parse advances the artifact pointer and prunes attempts strictly older
+// than the previously committed attempt, refunding their quota.
 func TestCommitCurrentAttempt_AdvancesAndPrunes(t *testing.T) {
 	artifactRepo := &stubArtifactRepo{
 		listResult: map[int][]types.KnowledgeArtifact{
@@ -206,7 +206,7 @@ func TestCommitCurrentAttempt_AdvancesAndPrunes(t *testing.T) {
 
 	tenant := &types.Tenant{ID: 10000, StorageUsed: 500}
 	ctx := artifactTestContext(tenant)
-	knowledge := &types.Knowledge{ID: "k1"}
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 2}
 
 	svc.commitCurrentAttempt(ctx, knowledge, 3)
 
@@ -243,7 +243,7 @@ func TestCommitCurrentAttempt_KeepsPreviousAttempt(t *testing.T) {
 		tenantRepo:   &stubTenantRepoForArtifacts{},
 	}
 	ctx := artifactTestContext(&types.Tenant{ID: 10000})
-	knowledge := &types.Knowledge{ID: "k1"}
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 1}
 
 	svc.commitCurrentAttempt(ctx, knowledge, 2)
 
@@ -274,6 +274,116 @@ func TestCommitCurrentAttempt_SkipsInvalidAttempt(t *testing.T) {
 	}
 	if len(artifactRepo.listCalls) != 0 {
 		t.Errorf("expected no retention for attempt=0, got %v", artifactRepo.listCalls)
+	}
+}
+
+// TestCommitCurrentAttempt_KeepsPreviousVersionAcrossFailedGap verifies the
+// retention window derives from the previously committed attempt, not the new
+// attempt number: a failed attempt 2 (partial leftovers, no commit) followed
+// by success 3 must keep the readable attempt 1 instead of evicting it.
+func TestCommitCurrentAttempt_KeepsPreviousVersionAcrossFailedGap(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			1: {{ID: "a1", StorageKey: "local://artifacts/k1/1/markdown", Size: 100}},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 500}
+	ctx := artifactTestContext(tenant)
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 1}
+
+	svc.commitCurrentAttempt(ctx, knowledge, 3)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 1 || artifactRepo.setCurrentAttemptCalls[0] != 3 {
+		t.Fatalf("expected SetCurrentAttempt(3), got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	if len(artifactRepo.listCalls) != 0 {
+		t.Errorf("expected no retention listing, got %v", artifactRepo.listCalls)
+	}
+	if len(artifactRepo.deleteByAttemptCalls) != 0 {
+		t.Errorf("expected no retention deletion, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if len(fileSvc.deleteCalls) != 0 {
+		t.Errorf("expected no artifact file deletion, got %v", fileSvc.deleteCalls)
+	}
+	if tenant.StorageUsed != 500 {
+		t.Errorf("expected StorageUsed unchanged, got %d", tenant.StorageUsed)
+	}
+}
+
+// TestCleanupFailedAttempt_RemovesUncommittedArtifacts verifies a parse
+// attempt that never committed (attempt > committed current) has its rows,
+// files and quota refunded.
+func TestCleanupFailedAttempt_RemovesUncommittedArtifacts(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			5: {
+				{ID: "p1", StorageKey: "local://artifacts/k1/5/markdown", Size: 100},
+				{ID: "p2", StorageKey: "", Size: 50},
+			},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 400}
+	ctx := artifactTestContext(tenant)
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 2}
+
+	svc.cleanupFailedAttempt(ctx, knowledge, 5)
+
+	if len(artifactRepo.deleteByAttemptCalls) != 1 || artifactRepo.deleteByAttemptCalls[0] != 5 {
+		t.Errorf("expected DeleteArtifactsByAttempt(5), got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if len(fileSvc.deleteCalls) != 1 || fileSvc.deleteCalls[0] != "local://artifacts/k1/5/markdown" {
+		t.Errorf("expected partial artifact file deletion, got %v", fileSvc.deleteCalls)
+	}
+	if len(tenantRepo.adjustCalls) != 1 || tenantRepo.adjustCalls[0] != -150 {
+		t.Errorf("expected storage refund of -150, got %v", tenantRepo.adjustCalls)
+	}
+	if tenant.StorageUsed != 250 {
+		t.Errorf("expected in-memory StorageUsed=250, got %d", tenant.StorageUsed)
+	}
+}
+
+// TestCleanupFailedAttempt_SkipsCommittedOrEmptyAttempts verifies the cleanup
+// is a no-op for attempts that committed (or were superseded by a later
+// commit) and for attempts without artifacts.
+func TestCleanupFailedAttempt_SkipsCommittedOrEmptyAttempts(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 3}
+
+	svc.cleanupFailedAttempt(ctx, knowledge, 3)
+	svc.cleanupFailedAttempt(ctx, knowledge, 2)
+	svc.cleanupFailedAttempt(ctx, knowledge, 0)
+	svc.cleanupFailedAttempt(ctx, knowledge, 4) // > committed, but no artifacts
+
+	if len(artifactRepo.listCalls) != 1 {
+		t.Errorf("expected a single ListArtifacts call (attempt 4), got %v", artifactRepo.listCalls)
+	}
+	if len(artifactRepo.deleteByAttemptCalls) != 0 {
+		t.Errorf("expected no deletion, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if len(tenantRepo.adjustCalls) != 0 {
+		t.Errorf("expected no storage adjustment, got %v", tenantRepo.adjustCalls)
 	}
 }
 
