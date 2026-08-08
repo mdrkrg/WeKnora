@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
+	dsoauth "github.com/Tencent/WeKnora/internal/datasource/oauth"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -390,6 +391,69 @@ func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) err
 	return nil
 }
 
+// attachCredentialPersister wires OAuth token write-back for connectors that
+// refresh tokens during API calls.
+func (s *DataSourceService) attachCredentialPersister(dsID string, config *types.DataSourceConfig) {
+	if config == nil || dsID == "" {
+		return
+	}
+	config.OnCredentialsUpdated = func(ctx context.Context, credentials map[string]interface{}) error {
+		return s.MergeDataSourceCredentials(ctx, dsID, credentials)
+	}
+}
+
+// enrichCanvasConfig injects deployment-level Canvas OAuth app credentials
+// into the in-memory datasource config so connectors never require users to
+// paste client_id / client_secret. Unavailable or misconfigured app
+// credentials are logged and skipped — startup validation (BuildContainer)
+// already fails fast on misconfiguration, so this only guards runtime
+// env drift.
+func (s *DataSourceService) enrichCanvasConfig(ctx context.Context, ds *types.DataSource, config *types.DataSourceConfig) {
+	if ds == nil || config == nil || ds.Type != types.ConnectorTypeCanvas {
+		return
+	}
+	app, err := dsoauth.LoadAppCredentials()
+	if err != nil {
+		logger.Warnf(ctx, "failed to load Canvas OAuth app credentials: %v", err)
+		return
+	}
+	if app == nil {
+		return
+	}
+	if config.Credentials == nil {
+		config.Credentials = map[string]interface{}{}
+	}
+	setIfEmpty := func(key, val string) {
+		raw, ok := config.Credentials[key]
+		if ok {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				return
+			}
+		}
+		config.Credentials[key] = val
+	}
+	setIfEmpty("base_url", app.BaseURL)
+	setIfEmpty("client_id", app.ClientID)
+	setIfEmpty("client_secret", app.ClientSecret)
+}
+
+// loadConnectorConfig parses a data source's persisted configuration and
+// attaches the runtime pieces connectors may need: deployment-level Canvas
+// OAuth app credentials plus the credential write-back hooks used when a
+// connector refreshes OAuth tokens mid-call.
+func (s *DataSourceService) loadConnectorConfig(ctx context.Context, ds *types.DataSource) (*types.DataSourceConfig, error) {
+	config, err := ds.ParseConfig()
+	if err != nil {
+		return nil, datasource.ErrInvalidConfig
+	}
+	if config == nil {
+		config = &types.DataSourceConfig{Type: ds.Type}
+	}
+	s.enrichCanvasConfig(ctx, ds, config)
+	s.attachCredentialPersister(ds.ID, config)
+	return config, nil
+}
+
 // ValidateConnection tests the connection to an external data source
 func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string) error {
 	ds, err := s.GetDataSource(ctx, dsID)
@@ -404,7 +468,7 @@ func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string)
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
@@ -446,7 +510,7 @@ func (s *DataSourceService) ListAvailableResources(
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
@@ -480,7 +544,7 @@ func (s *DataSourceService) ResolveResourceAncestors(
 		return nil, err
 	}
 
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
@@ -689,7 +753,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		logger.Errorf(ctx, "failed to parse config: %v", err)
 		syncLog.Status = types.SyncLogStatusFailed
@@ -1172,6 +1236,14 @@ func (s *DataSourceService) ValidateCredentials(ctx context.Context, connectorTy
 		Type:        connectorType,
 		Credentials: credentials,
 	}
+	if connectorType == types.ConnectorTypeCanvas {
+		// Stateless test: inject workspace app credentials from current tenant.
+		if tenantID, ok := types.TenantIDFromContext(ctx); ok && s.tenantRepo != nil {
+			if tenant, err := s.tenantRepo.GetTenantByID(ctx, tenantID); err == nil && tenant != nil {
+				s.enrichCanvasConfig(ctx, &types.DataSource{Type: connectorType, TenantID: tenantID}, config)
+			}
+		}
+	}
 
 	if err := connector.Validate(ctx, config); err != nil {
 		return err
@@ -1192,6 +1264,10 @@ func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *ty
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
+	if config == nil {
+		config = &types.DataSourceConfig{Type: ds.Type}
+	}
+	s.enrichCanvasConfig(ctx, ds, config)
 
 	return connector.Validate(ctx, config)
 }
