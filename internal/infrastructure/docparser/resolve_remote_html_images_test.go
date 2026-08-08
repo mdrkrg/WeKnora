@@ -58,6 +58,9 @@ func TestResolveRemoteImages_HTMLTagRewritesSrcAndKeepsTag(t *testing.T) {
 	if len(images) != 1 {
 		t.Fatalf("expected 1 stored image, got %d", len(images))
 	}
+	if images[0].Size != int64(len(createTestPNG(200, 200))) {
+		t.Errorf("expected image Size=%d, got %d", len(createTestPNG(200, 200)), images[0].Size)
+	}
 	if strings.Contains(updated, ts.URL) {
 		t.Errorf("original URL still present: %s", updated)
 	}
@@ -283,6 +286,9 @@ func TestResolveRemoteImages_WhitelistedHostAgreesWithDocument(t *testing.T) {
 
 	if len(images) != 1 {
 		t.Fatalf("expected 1 stored image, got %d", len(images))
+	}
+	if images[0].Size != int64(len(createTestPNG(200, 200))) {
+		t.Errorf("expected whitelisted image Size=%d, got %d", len(createTestPNG(200, 200)), images[0].Size)
 	}
 	if atomic.LoadInt64(&hits) != 1 {
 		t.Fatalf("expected the image to be downloaded once, got %d", hits)

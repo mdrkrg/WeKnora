@@ -126,6 +126,9 @@ func TestResolveDataURIImages(t *testing.T) {
 	if len(imgs) != 1 {
 		t.Fatalf("got %d images", len(imgs))
 	}
+	if imgs[0].Size != int64(len(png)) {
+		t.Errorf("expected image Size=%d, got %d", len(png), imgs[0].Size)
+	}
 	if len(svc.saved) != 1 || !bytes.Equal(svc.saved[0], png) {
 		t.Fatal("SaveBytes payload mismatch")
 	}
@@ -198,6 +201,9 @@ func TestResolveHTMLDataURIImages(t *testing.T) {
 	if len(imgs) != 1 {
 		t.Fatalf("expected 1 image from HTML img tag but got %d", len(imgs))
 	}
+	if imgs[0].Size != int64(len(png)) {
+		t.Errorf("expected image Size=%d, got %d", len(png), imgs[0].Size)
+	}
 	if strings.Contains(out, "<img") || strings.Contains(out, "base64") {
 		t.Fatalf("HTML img tag or base64 still present: %s", out[:min(200, len(out))])
 	}
@@ -219,6 +225,9 @@ func TestResolveBareBase64Content_BareDataURI(t *testing.T) {
 	if len(imgs) != 1 {
 		t.Fatalf("expected 1 image from bare data URI but got %d", len(imgs))
 	}
+	if imgs[0].Size != int64(len(png)) {
+		t.Errorf("expected image Size=%d, got %d", len(png), imgs[0].Size)
+	}
 	if strings.Contains(out, "base64") {
 		t.Fatalf("base64 content still present: %s", out[:min(200, len(out))])
 	}
@@ -239,6 +248,9 @@ func TestResolveBareBase64Content_InsideBrokenMarkdownRef(t *testing.T) {
 	}
 	if len(imgs) != 1 {
 		t.Fatalf("expected 1 image but got %d", len(imgs))
+	}
+	if imgs[0].Size != int64(len(png)) {
+		t.Errorf("expected image Size=%d, got %d", len(png), imgs[0].Size)
 	}
 	if strings.Contains(out, "base64") {
 		t.Fatalf("base64 still present: %s", out[:min(200, len(out))])
