@@ -162,6 +162,11 @@ type ProcessChunksOptions struct {
 	// child's ParentIndex references an entry in this slice.
 	ParentChunks []types.ParsedParentChunk
 	Metadata     map[string]string
+	// CommitArtifactAttempt advances the parsed-artifact pointer to the current
+	// attempt once chunking and indexing succeed. Only flows that persisted
+	// artifacts (file/URL parse) set this; passage imports and manual updates
+	// must not touch the pointer.
+	CommitArtifactAttempt bool
 }
 
 // finalizeIndexedKnowledgeState makes a document retrievable as soon as chunks
@@ -638,6 +643,13 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks update knowledge failed")
+	} else if options.CommitArtifactAttempt {
+		// The document parse (extraction, image resolution, chunking, indexing)
+		// succeeded at this point. Advance the artifact pointer and prune stale
+		// attempts: downstream enrichment subtasks (summary, question, graph)
+		// never invalidate artifacts, so a failure there must neither promote a
+		// partial attempt nor evict the previous successful version.
+		s.commitCurrentAttempt(ctx, knowledge, attemptFromCtx(ctx))
 	}
 
 	// Enqueue multimodal tasks for images (async, non-blocking)
@@ -3524,6 +3536,7 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		QuestionCount:            payload.QuestionCount,
 		EnableMultimodel:         payload.EnableMultimodel,
 		StoredImages:             storedImages,
+		CommitArtifactAttempt:    true,
 	}
 
 	if convertResult != nil {
@@ -4030,51 +4043,66 @@ func (s *knowledgeService) saveProcessArtifacts(
 		}
 	}
 
-	// 4. Set current attempt on knowledge and cleanup old attempts (keep current + prev)
-	if s.artifactRepo != nil {
-		if err := s.artifactRepo.SetCurrentAttempt(ctx, knowledge.ID, attempt); err != nil {
-			logger.Warnf(ctx, "Failed to set current_attempt on knowledge %s: %v", knowledge.ID, err)
-		}
-		knowledge.CurrentAttempt = attempt
+	return nil
+}
 
-		// Retention: delete artifacts for attempts older than (current - 1).
-		// Keep current attempt + the previous successful attempt.
-		oldestToKeep := attempt - 1
-		if oldestToKeep < 1 {
-			oldestToKeep = 1
+// commitCurrentAttempt advances the artifact pointer after a parse attempt has
+// fully succeeded (extraction, image resolution, chunking and indexing). It also
+// prunes artifacts of attempts older than current-1, keeping the current and
+// previous successful versions. Running it only on the success path means a
+// failed attempt can never become the readable "current" version, nor evict the
+// previous successful one.
+func (s *knowledgeService) commitCurrentAttempt(ctx context.Context, knowledge *types.Knowledge, attempt int) {
+	if s.artifactRepo == nil || attempt <= 0 {
+		return
+	}
+	if err := s.artifactRepo.SetCurrentAttempt(ctx, knowledge.ID, attempt); err != nil {
+		logger.Warnf(ctx, "Failed to set current_attempt on knowledge %s: %v", knowledge.ID, err)
+		return
+	}
+	knowledge.CurrentAttempt = attempt
+
+	tenantID, _ := types.TenantIDFromContext(ctx)
+	if tenantID == 0 {
+		return
+	}
+
+	// Retention: delete artifacts for attempts older than (current - 1).
+	// Keep the current attempt + the previous successful attempt.
+	oldestToKeep := attempt - 1
+	if oldestToKeep < 1 {
+		oldestToKeep = 1
+	}
+	for old := 1; old < oldestToKeep; old++ {
+		oldArtifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantID, knowledge.ID, old)
+		if err != nil {
+			logger.Warnf(ctx, "Failed to list old artifacts for cleanup (attempt %d): %v", old, err)
+			continue
 		}
-		for old := 1; old < oldestToKeep; old++ {
-			oldArtifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantInfo.ID, knowledge.ID, old)
-			if err != nil {
-				logger.Warnf(ctx, "Failed to list old artifacts for cleanup (attempt %d): %v", old, err)
-				continue
-			}
-			var oldTotalSize int64
-			for _, a := range oldArtifacts {
-				if a.StorageKey != "" {
-					if err := s.fileSvc.DeleteFile(ctx, a.StorageKey); err != nil {
-						logger.Warnf(ctx, "Failed to clean old artifact file %s: %v", a.StorageKey, err)
-					}
+		var oldTotalSize int64
+		for _, a := range oldArtifacts {
+			if a.StorageKey != "" {
+				if err := s.fileSvc.DeleteFile(ctx, a.StorageKey); err != nil {
+					logger.Warnf(ctx, "Failed to clean old artifact file %s: %v", a.StorageKey, err)
 				}
-				oldTotalSize += a.Size
 			}
-			if _, err := s.artifactRepo.DeleteArtifactsByAttempt(ctx, tenantInfo.ID, knowledge.ID, old); err != nil {
-				logger.Warnf(ctx, "Failed to clean old artifact rows (attempt %d): %v", old, err)
-			}
-			if oldTotalSize > 0 {
-				if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantInfo.ID, -oldTotalSize); err != nil {
-					logger.Warnf(ctx, "Failed to adjust storage for retention cleanup: %v", err)
-				} else {
-					tenantInfo.StorageUsed -= oldTotalSize
-					if tenantInfo.StorageUsed < 0 {
-						tenantInfo.StorageUsed = 0
-					}
+			oldTotalSize += a.Size
+		}
+		if _, err := s.artifactRepo.DeleteArtifactsByAttempt(ctx, tenantID, knowledge.ID, old); err != nil {
+			logger.Warnf(ctx, "Failed to clean old artifact rows (attempt %d): %v", old, err)
+			continue
+		}
+		if oldTotalSize > 0 {
+			if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantID, -oldTotalSize); err != nil {
+				logger.Warnf(ctx, "Failed to adjust storage for retention cleanup: %v", err)
+			} else if tenantInfo, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok && tenantInfo != nil {
+				tenantInfo.StorageUsed -= oldTotalSize
+				if tenantInfo.StorageUsed < 0 {
+					tenantInfo.StorageUsed = 0
 				}
 			}
 		}
 	}
-
-	return nil
 }
 
 func (s *knowledgeService) checkQuotaAndSaveArtifact(

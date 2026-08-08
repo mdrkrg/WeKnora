@@ -6,15 +6,22 @@ import (
 	"mime/multipart"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
-// stubArtifactRepo captures SetCurrentAttempt and CreateArtifact calls.
+// stubArtifactRepo captures artifact repository calls for white-box tests.
 type stubArtifactRepo struct {
 	interfaces.KnowledgeArtifactRepository
 	setCurrentAttemptCalls []int
-	createCalls             []*types.KnowledgeArtifact
+	createCalls            []*types.KnowledgeArtifact
+	listCalls              []int
+	listResult             map[int][]types.KnowledgeArtifact
+	deleteByAttemptCalls   []int
+	deleteByTypeCalls      []string
+	deleteByKnowledgeCalls int
+	existing               *types.KnowledgeArtifact // returned by GetArtifactByType when matching
 }
 
 func (s *stubArtifactRepo) CreateArtifact(_ context.Context, a *types.KnowledgeArtifact) error {
@@ -27,24 +34,52 @@ func (s *stubArtifactRepo) SetCurrentAttempt(_ context.Context, _ string, attemp
 	return nil
 }
 
-func (s *stubArtifactRepo) ListArtifacts(_ context.Context, _ uint64, _ string, _ int) ([]types.KnowledgeArtifact, error) {
+func (s *stubArtifactRepo) ListArtifacts(_ context.Context, _ uint64, _ string, attempt int) ([]types.KnowledgeArtifact, error) {
+	s.listCalls = append(s.listCalls, attempt)
+	if s.listResult != nil {
+		return s.listResult[attempt], nil
+	}
 	return nil, nil
 }
 
-func (s *stubArtifactRepo) DeleteArtifactsByAttempt(_ context.Context, _ uint64, _ string, _ int) (int64, error) {
+func (s *stubArtifactRepo) DeleteArtifactsByAttempt(_ context.Context, _ uint64, _ string, attempt int) (int64, error) {
+	s.deleteByAttemptCalls = append(s.deleteByAttemptCalls, attempt)
 	return 0, nil
 }
 
-// stubFileSvcForArtifacts implements just SaveBytes and DeleteFile.
+func (s *stubArtifactRepo) DeleteArtifactsByKnowledgeID(_ context.Context, _ uint64, _ string) (int64, error) {
+	s.deleteByKnowledgeCalls++
+	return 0, nil
+}
+
+func (s *stubArtifactRepo) DeleteArtifactByType(_ context.Context, _ uint64, _ string, _ int, artifactType, _ string) (int64, error) {
+	s.deleteByTypeCalls = append(s.deleteByTypeCalls, artifactType)
+	return 0, nil
+}
+
+func (s *stubArtifactRepo) GetArtifactByType(_ context.Context, _ uint64, _ string, _ int, artifactType, _ string) (*types.KnowledgeArtifact, error) {
+	if s.existing != nil && s.existing.ArtifactType == artifactType {
+		return s.existing, nil
+	}
+	return nil, repository.ErrArtifactNotFound
+}
+
+// stubFileSvcForArtifacts implements just the file operations the artifact
+// code paths need.
 type stubFileSvcForArtifacts struct {
 	interfaces.FileService
+	deleteCalls []string
 }
 
 func (s *stubFileSvcForArtifacts) SaveBytes(_ context.Context, data []byte, _ uint64, fileName string, _ bool) (string, error) {
 	return "local://fake/" + fileName, nil
 }
 
-func (s *stubFileSvcForArtifacts) DeleteFile(_ context.Context, _ string) error { return nil }
+func (s *stubFileSvcForArtifacts) DeleteFile(_ context.Context, key string) error {
+	s.deleteCalls = append(s.deleteCalls, key)
+	return nil
+}
+
 func (s *stubFileSvcForArtifacts) GetFile(_ context.Context, _ string) (io.ReadCloser, error) {
 	return nil, nil
 }
@@ -70,9 +105,14 @@ func (s *stubTenantRepoForArtifacts) AdjustStorageUsed(_ context.Context, _ uint
 	return nil
 }
 
+func artifactTestContext(tenant *types.Tenant) context.Context {
+	ctx := context.WithValue(context.Background(), types.TenantInfoContextKey, tenant)
+	return context.WithValue(ctx, types.TenantIDContextKey, tenant.ID)
+}
+
 // TestSaveProcessArtifacts_RejectsZeroAttempt verifies that
-// saveProcessArtifacts must not persist artifacts or call
-// SetCurrentAttempt when attempt <= 0. Attempt 0 means "never parsed"
+// saveProcessArtifacts must not persist artifacts or commit the
+// current attempt when attempt <= 0. Attempt 0 means "never parsed"
 // in the read path; saving artifacts with attempt=0 makes them
 // invisible because ListArtifacts/GetArtifactByType fall back to
 // knowledge.CurrentAttempt (still 0) and return nil.
@@ -85,7 +125,7 @@ func TestSaveProcessArtifacts_RejectsZeroAttempt(t *testing.T) {
 	}
 
 	tenant := &types.Tenant{ID: 10000}
-	ctx := context.WithValue(context.Background(), types.TenantInfoContextKey, tenant)
+	ctx := artifactTestContext(tenant)
 
 	knowledge := &types.Knowledge{ID: "k1", TenantID: 10000}
 	result := &types.ReadResult{
@@ -107,8 +147,10 @@ func TestSaveProcessArtifacts_RejectsZeroAttempt(t *testing.T) {
 }
 
 // TestSaveProcessArtifacts_ValidAttempt verifies that with a proper
-// attempt number (>=1), artifacts are saved and SetCurrentAttempt is
-// called with the correct value.
+// attempt number (>=1), artifacts are saved. The pointer commit is
+// exercised separately via TestCommitCurrentAttempt* — saveProcessArtifacts
+// itself must NOT advance current_attempt, because the parse may still fail
+// in chunking/indexing after artifacts were persisted.
 func TestSaveProcessArtifacts_ValidAttempt(t *testing.T) {
 	artifactRepo := &stubArtifactRepo{}
 	svc := &knowledgeService{
@@ -118,7 +160,7 @@ func TestSaveProcessArtifacts_ValidAttempt(t *testing.T) {
 	}
 
 	tenant := &types.Tenant{ID: 10000}
-	ctx := context.WithValue(context.Background(), types.TenantInfoContextKey, tenant)
+	ctx := artifactTestContext(tenant)
 
 	knowledge := &types.Knowledge{ID: "k1", TenantID: 10000}
 	result := &types.ReadResult{
@@ -139,7 +181,97 @@ func TestSaveProcessArtifacts_ValidAttempt(t *testing.T) {
 			t.Errorf("expected attempt=1 on artifact, got %d", a.Attempt)
 		}
 	}
-	if len(artifactRepo.setCurrentAttemptCalls) != 1 || artifactRepo.setCurrentAttemptCalls[0] != 1 {
-		t.Errorf("expected SetCurrentAttempt(1), got %v", artifactRepo.setCurrentAttemptCalls)
+	if len(artifactRepo.setCurrentAttemptCalls) != 0 {
+		t.Errorf("saveProcessArtifacts must not commit the attempt, got SetCurrentAttempt calls %v", artifactRepo.setCurrentAttemptCalls)
+	}
+}
+
+// TestCommitCurrentAttempt_AdvancesAndPrunes verifies that a successful
+// parse advances the artifact pointer and prunes attempts older than
+// current-1, refunding their quota.
+func TestCommitCurrentAttempt_AdvancesAndPrunes(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			1: {{ID: "a1", StorageKey: "local://artifacts/k1/1/markdown", Size: 100}},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 500}
+	ctx := artifactTestContext(tenant)
+	knowledge := &types.Knowledge{ID: "k1"}
+
+	svc.commitCurrentAttempt(ctx, knowledge, 3)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 1 || artifactRepo.setCurrentAttemptCalls[0] != 3 {
+		t.Fatalf("expected SetCurrentAttempt(3), got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	if knowledge.CurrentAttempt != 3 {
+		t.Errorf("expected knowledge.CurrentAttempt=3, got %d", knowledge.CurrentAttempt)
+	}
+	if len(artifactRepo.listCalls) != 1 || artifactRepo.listCalls[0] != 1 {
+		t.Errorf("expected retention to list attempt 1, got %v", artifactRepo.listCalls)
+	}
+	if len(fileSvc.deleteCalls) != 1 || fileSvc.deleteCalls[0] != "local://artifacts/k1/1/markdown" {
+		t.Errorf("expected stale artifact file deletion, got %v", fileSvc.deleteCalls)
+	}
+	if len(artifactRepo.deleteByAttemptCalls) != 1 || artifactRepo.deleteByAttemptCalls[0] != 1 {
+		t.Errorf("expected DeleteArtifactsByAttempt(1), got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if len(tenantRepo.adjustCalls) != 1 || tenantRepo.adjustCalls[0] != -100 {
+		t.Errorf("expected storage refund of -100, got %v", tenantRepo.adjustCalls)
+	}
+	if tenant.StorageUsed != 400 {
+		t.Errorf("expected in-memory StorageUsed=400, got %d", tenant.StorageUsed)
+	}
+}
+
+// TestCommitCurrentAttempt_KeepsPreviousAttempt verifies attempt 2 keeps
+// attempt 1 (oldestToKeep=1 → nothing pruned).
+func TestCommitCurrentAttempt_KeepsPreviousAttempt(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      &stubFileSvcForArtifacts{},
+		tenantRepo:   &stubTenantRepoForArtifacts{},
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+	knowledge := &types.Knowledge{ID: "k1"}
+
+	svc.commitCurrentAttempt(ctx, knowledge, 2)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 1 || artifactRepo.setCurrentAttemptCalls[0] != 2 {
+		t.Fatalf("expected SetCurrentAttempt(2), got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	if len(artifactRepo.deleteByAttemptCalls) != 0 {
+		t.Errorf("expected no retention deletion for attempt 2, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+}
+
+// TestCommitCurrentAttempt_SkipsInvalidAttempt verifies attempt <= 0 never
+// advances the pointer.
+func TestCommitCurrentAttempt_SkipsInvalidAttempt(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      &stubFileSvcForArtifacts{},
+		tenantRepo:   &stubTenantRepoForArtifacts{},
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+	knowledge := &types.Knowledge{ID: "k1"}
+
+	svc.commitCurrentAttempt(ctx, knowledge, 0)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 0 {
+		t.Errorf("expected no SetCurrentAttempt for attempt=0, got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	if len(artifactRepo.listCalls) != 0 {
+		t.Errorf("expected no retention for attempt=0, got %v", artifactRepo.listCalls)
 	}
 }
