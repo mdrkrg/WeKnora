@@ -579,3 +579,101 @@ func TestIsQuotaExceededError(t *testing.T) {
 		t.Error("expected nil error to classify as retryable/not permanent")
 	}
 }
+
+// stubSpanTrackerForArtifacts lets artifact tests control LatestAttempt so
+// the superseded-commit decision can be pinned.
+type stubSpanTrackerForArtifacts struct {
+	SpanTracker
+	latest int
+}
+
+func (s *stubSpanTrackerForArtifacts) LatestAttempt(_ context.Context, _ string) int {
+	return s.latest
+}
+
+// TestMaybeCommitArtifactAttempt_CommitsWhenNotSuperseded verifies a normal
+// successful parse still advances the artifact pointer.
+func TestMaybeCommitArtifactAttempt_CommitsWhenNotSuperseded(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      &stubFileSvcForArtifacts{},
+		tenantRepo:   &stubTenantRepoForArtifacts{},
+		spanTracker:  &stubSpanTrackerForArtifacts{latest: 2},
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 2}
+
+	svc.maybeCommitArtifactAttempt(ctx, knowledge, 3)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 1 || artifactRepo.setCurrentAttemptCalls[0] != 3 {
+		t.Errorf("expected SetCurrentAttempt(3), got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	// Retention (not superseded cleanup) prunes attempts older than prevCurrent=2.
+	if len(artifactRepo.deleteByAttemptCalls) != 1 || artifactRepo.deleteByAttemptCalls[0] != 1 {
+		t.Errorf("expected retention prune of attempt 1, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+}
+
+// TestMaybeCommitArtifactAttempt_SkipsCommitWhenSuperseded verifies a stale
+// task whose attempt was superseded neither regresses the committed pointer
+// nor leaves leftovers behind.
+func TestMaybeCommitArtifactAttempt_SkipsCommitWhenSuperseded(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			3: {{ID: "stale", StorageKey: "local://artifacts/k1/3/markdown", Size: 10}},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+		spanTracker:  &stubSpanTrackerForArtifacts{latest: 4},
+	}
+	tenant := &types.Tenant{ID: 10000, StorageUsed: 100}
+	ctx := artifactTestContext(tenant)
+	knowledge := &types.Knowledge{ID: "k1", CurrentAttempt: 2}
+
+	svc.maybeCommitArtifactAttempt(ctx, knowledge, 3)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 0 {
+		t.Errorf("expected NO SetCurrentAttempt for superseded attempt, got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	if knowledge.CurrentAttempt != 2 {
+		t.Errorf("expected committed pointer unchanged (2), got %d", knowledge.CurrentAttempt)
+	}
+	if len(artifactRepo.deleteByAttemptCalls) != 1 || artifactRepo.deleteByAttemptCalls[0] != 3 {
+		t.Errorf("expected cleanup of superseded attempt 3, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+	if len(fileSvc.deleteCalls) != 1 {
+		t.Errorf("expected stale artifact file deletion, got %v", fileSvc.deleteCalls)
+	}
+	if tenant.StorageUsed != 90 {
+		t.Errorf("expected refunded StorageUsed=90, got %d", tenant.StorageUsed)
+	}
+}
+
+// TestMaybeCommitArtifactAttempt_AttemptZeroIsNeverSuperseded verifies legacy
+// payloads (attempt 0, tracking disabled) keep the pre-guard behavior.
+func TestMaybeCommitArtifactAttempt_AttemptZeroIsNeverSuperseded(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      &stubFileSvcForArtifacts{},
+		tenantRepo:   &stubTenantRepoForArtifacts{},
+		spanTracker:  &stubSpanTrackerForArtifacts{latest: 9},
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+	knowledge := &types.Knowledge{ID: "k1"}
+
+	svc.maybeCommitArtifactAttempt(ctx, knowledge, 0)
+
+	if len(artifactRepo.setCurrentAttemptCalls) != 0 {
+		t.Errorf("commitCurrentAttempt guards attempt 0; got %v", artifactRepo.setCurrentAttemptCalls)
+	}
+	if len(artifactRepo.deleteByAttemptCalls) != 0 {
+		t.Errorf("expected no cleanup for attempt 0, got %v", artifactRepo.deleteByAttemptCalls)
+	}
+}

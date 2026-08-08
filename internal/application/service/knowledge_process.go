@@ -649,7 +649,10 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		// attempts: downstream enrichment subtasks (summary, question, graph)
 		// never invalidate artifacts, so a failure there must neither promote a
 		// partial attempt nor evict the previous successful version.
-		s.commitCurrentAttempt(ctx, knowledge, attemptFromCtx(ctx))
+		// maybeCommitArtifactAttempt also guards against a stale task whose
+		// attempt was superseded by a newer parse between its entry check and
+		// this point — a stale commit would regress the pointer.
+		s.maybeCommitArtifactAttempt(ctx, knowledge, attemptFromCtx(ctx))
 	}
 
 	// Enqueue multimodal tasks for images (async, non-blocking)
@@ -3247,6 +3250,22 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	processOverrides, _ := knowledge.ProcessOverrides()
 	eff := ResolveProcessConfig(kb, processOverrides)
 
+	// A newer parse (re-upload / edit / reparse) has superseded this one.
+	// Bail before the status flip or any destructive work so the stale task
+	// neither clobbers the newer attempt's chunks/index nor regresses the
+	// committed artifact pointer (a stale commit would SetCurrentAttempt back
+	// to an older attempt). Leftover artifacts of this attempt — e.g. a
+	// redelivered task that crashed after the artifact save — are cleaned
+	// best-effort. attempt <= 0 (legacy payloads, tracking disabled) is never
+	// superseded; the OpenAttempt fallback allocates a fresh number that
+	// cannot be superseded at allocation time.
+	if payload.Attempt > 0 && attemptSuperseded(ctx, s.tracker(), payload.KnowledgeID, payload.Attempt) {
+		logger.Infof(ctx, "document process: attempt %d superseded for %s, skipping stale task",
+			payload.Attempt, payload.KnowledgeID)
+		s.cleanupFailedAttempt(ctx, knowledge, payload.Attempt)
+		return nil
+	}
+
 	// Re-check abort status right before flipping to "processing" — closes
 	// the race where the user cancels between the entry guard above and
 	// this write (otherwise the worker would overwrite cancelled→processing
@@ -4122,6 +4141,19 @@ func (s *knowledgeService) commitCurrentAttempt(ctx context.Context, knowledge *
 			}
 		}
 	}
+}
+
+// maybeCommitArtifactAttempt commits the artifact pointer for a successful
+// parse unless a newer attempt has superseded this one in the meantime; the
+// superseded attempt's leftovers are cleaned instead, so the committed
+// pointer never regresses to a stale attempt.
+func (s *knowledgeService) maybeCommitArtifactAttempt(ctx context.Context, knowledge *types.Knowledge, attempt int) {
+	if attempt > 0 && attemptSuperseded(ctx, s.tracker(), knowledge.ID, attempt) {
+		logger.Infof(ctx, "processChunks: attempt %d superseded for %s, skipping artifact commit", attempt, knowledge.ID)
+		s.cleanupFailedAttempt(ctx, knowledge, attempt)
+		return
+	}
+	s.commitCurrentAttempt(ctx, knowledge, attempt)
 }
 
 // cleanupFailedAttempt best-effort removes artifacts left behind by a parse
