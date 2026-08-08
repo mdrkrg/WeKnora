@@ -269,6 +269,14 @@ var ConnectorMetadataRegistry = map[string]ConnectorMetadata{
 		AuthType:     "custom",
 		Capabilities: []string{"incremental"},
 	},
+	types.ConnectorTypeCanvas: {
+		Type:         types.ConnectorTypeCanvas,
+		Name:         "Canvas LMS",
+		Description:  "Sync course files from Canvas LMS via OAuth2",
+		Priority:     8,
+		AuthType:     "oauth2",
+		Capabilities: []string{"incremental"},
+	},
 }
 
 // ListAvailableConnectors returns all available connector metadata

@@ -289,6 +289,30 @@ func RegisterDataSourceRoutes(
 	}
 }
 
+// RegisterDataSourceOAuthRoutes registers the data-source OAuth2
+// authorization-code flow routes (currently the Canvas connector). The
+// public callback is state-authenticated (no bearer) and lives outside
+// /datasource/:id to avoid static-vs-param conflicts, mirrored after MCP
+// OAuth. The site-global Canvas OAuth status probe is registered here too.
+func RegisterDataSourceOAuthRoutes(
+	r *gin.RouterGroup,
+	oauthHandler *handler.DataSourceOAuthHandler,
+	adminHandler *handler.CanvasOAuthAdminHandler,
+	g *rbacGuards,
+) {
+	if oauthHandler != nil {
+		r.GET("/datasource/oauth/callback", oauthHandler.Callback)
+		ds := g.apiKeyGroup(r.Group("/datasource"), apiKeyManageDataSources(apiKeyFullAccess()))
+		// OAuth2 authorization-code flow — Admin+
+		ds.POST("/:id/oauth/authorize-url", g.Admin(), oauthHandler.AuthorizeURL)
+		ds.GET("/:id/oauth/status", g.Admin(), oauthHandler.Status)
+		ds.DELETE("/:id/oauth/token", g.Admin(), oauthHandler.Revoke)
+	}
+	if adminHandler != nil {
+		g.apiKeyRoute(r, http.MethodGet, "/canvas/oauth/status", apiKeyManageDataSources(apiKeyFullAccess()), g.Viewer(), adminHandler.Status)
+	}
+}
+
 // RegisterWeKnoraCloudRoutes 注册 WeKnoraCloud 初始化路由
 // RegisterWeKnoraCloudRoutes registers the WeKnoraCloud credential
 // management endpoints. SaveCredentials persists external SaaS keys

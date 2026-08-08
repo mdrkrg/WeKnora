@@ -97,6 +97,9 @@ app:
     STREAM_MANAGER_TYPE: redis
     CONCURRENCY_POOL_SIZE: "5"
     TZ: UTC
+    # -- Canvas OAuth (deployment-level / site-global). Leave all three empty to disable.
+    CANVAS_OAUTH_BASE_URL: ""
+    CANVAS_OAUTH_CLIENT_ID: ""
 
   # -- Additional environment variables
   extraEnv: []
@@ -405,6 +408,10 @@ secrets:
   # SYSTEM_AES_KEY exclusively. The Go app no longer reads TENANT_AES_KEY and
   # it has been removed from the Secret.
   systemAesKey: ""
+
+  # -- Canvas OAuth app client_secret. If you set CANVAS_OAUTH_BASE_URL and
+  # CANVAS_OAUTH_CLIENT_ID, this must also be set.
+  canvasOAuthClientSecret: ""
 
   # -- Use existing secret instead of creating one
   # The secret must contain keys: DB_USER, DB_PASSWORD, DB_NAME, REDIS_USERNAME, REDIS_PASSWORD, JWT_SECRET, SYSTEM_AES_KEY

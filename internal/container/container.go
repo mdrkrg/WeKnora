@@ -60,6 +60,8 @@ import (
 	notionConnector "github.com/Tencent/WeKnora/internal/datasource/connector/notion"
 	rssConnector "github.com/Tencent/WeKnora/internal/datasource/connector/rss"
 	yuqueConnector "github.com/Tencent/WeKnora/internal/datasource/connector/yuque"
+	canvasConnector "github.com/Tencent/WeKnora/internal/datasource/connector/canvas"
+	dsoauth "github.com/Tencent/WeKnora/internal/datasource/oauth"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/handler"
 	"github.com/Tencent/WeKnora/internal/handler/session"
@@ -361,6 +363,16 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewModelCredentialsHandler))
 	must(container.Provide(handler.NewWebSearchProviderCredentialsHandler))
 	must(container.Provide(handler.NewDataSourceCredentialsHandler))
+	must(container.Provide(service.NewCanvasOAuthService))
+	must(container.Provide(dsoauth.NewManager))
+	// Fail fast on partially configured or invalid Canvas OAuth app
+	// credentials: all-empty is allowed (feature disabled), anything else
+	// must be complete and pass SSRF validation.
+	if _, err := dsoauth.LoadAppCredentials(); err != nil {
+		must(err)
+	}
+	must(container.Provide(handler.NewDataSourceOAuthHandler))
+	must(container.Provide(handler.NewCanvasOAuthAdminHandler))
 	must(container.Provide(handler.NewWebSearchHandler))
 	must(container.Provide(handler.NewWebSearchProviderHandler))
 	must(container.Provide(handler.NewVectorStoreHandler))
@@ -1623,6 +1635,9 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
 	}
 	if err := registry.Register(rssConnector.NewConnector()); err != nil {
 		errs = errors.Join(errs, fmt.Errorf("register rss connector: %w", err))
+	}
+	if err := registry.Register(canvasConnector.NewConnector()); err != nil {
+		errs = errors.Join(errs, fmt.Errorf("register canvas connector: %w", err))
 	}
 
 	// Future connectors will be registered here:
