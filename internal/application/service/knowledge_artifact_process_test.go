@@ -275,3 +275,36 @@ func TestCommitCurrentAttempt_SkipsInvalidAttempt(t *testing.T) {
 		t.Errorf("expected no retention for attempt=0, got %v", artifactRepo.listCalls)
 	}
 }
+
+// TestCleanupKnowledgeArtifacts verifies delete-time cleanup removes rows,
+// files and refunds the tenant quota for all attempts of a knowledge.
+func TestCleanupKnowledgeArtifacts(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			0: {
+				{ID: "a1", StorageKey: "local://a/1", Size: 10},
+				{ID: "a2", StorageKey: "local://a/2", Size: 20},
+			},
+		},
+	}
+	fileSvc := &stubFileSvcForArtifacts{}
+	tenantRepo := &stubTenantRepoForArtifacts{}
+	svc := &knowledgeService{
+		artifactRepo: artifactRepo,
+		fileSvc:      fileSvc,
+		tenantRepo:   tenantRepo,
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+
+	svc.cleanupKnowledgeArtifacts(ctx, 10000, "k1")
+
+	if artifactRepo.deleteByKnowledgeCalls != 1 {
+		t.Errorf("expected DeleteArtifactsByKnowledgeID, got %d calls", artifactRepo.deleteByKnowledgeCalls)
+	}
+	if len(fileSvc.deleteCalls) != 2 {
+		t.Errorf("expected 2 artifact file deletions, got %v", fileSvc.deleteCalls)
+	}
+	if len(tenantRepo.adjustCalls) != 1 || tenantRepo.adjustCalls[0] != -30 {
+		t.Errorf("expected storage refund of -30, got %v", tenantRepo.adjustCalls)
+	}
+}
