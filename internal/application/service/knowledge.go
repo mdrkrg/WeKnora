@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1266,6 +1267,26 @@ func (s *knowledgeService) DownloadArtifact(ctx context.Context, knowledgeID str
 	reader, err := s.fileSvc.GetFile(ctx, artifact.StorageKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read artifact content: %w", err)
+	}
+
+	if req.ResolveImages {
+		// Resolving provider:// references to presigned HTTP URLs requires the
+		// full content, so buffer the artifact for this opt-in path only.
+		contentBytes, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			return nil, "", fmt.Errorf("failed to read artifact bytes: %w", readErr)
+		}
+		if closeErr != nil {
+			logger.Warnf(ctx, "Failed to close artifact reader: %v", closeErr)
+		}
+		resolved, resolveErr := s.resolveImageURLs(ctx, string(contentBytes))
+		if resolveErr != nil {
+			logger.Warnf(ctx, "Failed to resolve image URLs in artifact: %v", resolveErr)
+		} else {
+			contentBytes = []byte(resolved)
+		}
+		return io.NopCloser(bytes.NewReader(contentBytes)), artifactContentType(artifact.Format), nil
 	}
 
 	return reader, artifactContentType(artifact.Format), nil

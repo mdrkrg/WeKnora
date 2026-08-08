@@ -169,6 +169,7 @@ func (h *KnowledgeHandler) DownloadArtifact(c *gin.Context) {
 	c.Header("Content-Type", ct)
 	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "artifact"}))
 	c.Header("Cache-Control", "no-cache")
-	dataLen := reader
-	c.DataFromReader(http.StatusOK, -1, ct, dataLen, nil)
+	// Content-Length is unknown for the streamed body; -1 makes
+	// DataFromReader fall back to chunked transfer encoding.
+	c.DataFromReader(http.StatusOK, -1, ct, reader, nil)
 }
