@@ -1207,7 +1207,9 @@ func (s *knowledgeService) ListArtifacts(ctx context.Context, knowledgeID string
 		attempt = knowledge.CurrentAttempt
 	}
 	if attempt <= 0 {
-		return nil, nil
+		// Never parsed yet: return an empty (non-nil) slice so the JSON
+		// body is [] instead of null, matching the API contract.
+		return []types.ArtifactListItem{}, nil
 	}
 
 	artifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantID, knowledgeID, attempt)

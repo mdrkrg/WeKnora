@@ -5,6 +5,7 @@ import (
 	"io"
 	"mime/multipart"
 	"testing"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -356,5 +357,100 @@ func TestSaveProcessArtifacts_ReplacesExistingArtifact(t *testing.T) {
 	}
 	if tenant.StorageUsed != 200-50+int64(len(result.MarkdownContent))+2 {
 		t.Errorf("unexpected in-memory storage accounting: %d", tenant.StorageUsed)
+	}
+}
+
+// artifactListKnowledgeRepo returns a fixed knowledge for ListArtifacts tests.
+type artifactListKnowledgeRepo struct {
+	interfaces.KnowledgeRepository
+	knowledge *types.Knowledge
+}
+
+func (r *artifactListKnowledgeRepo) GetKnowledgeByID(
+	_ context.Context,
+	_ uint64,
+	_ string,
+) (*types.Knowledge, error) {
+	return r.knowledge, nil
+}
+
+// TestListArtifacts_NeverParsedReturnsEmptySlice verifies that a knowledge
+// that was never parsed (CurrentAttempt=0) yields an empty, non-nil slice so
+// the API returns [] instead of null.
+func TestListArtifacts_NeverParsedReturnsEmptySlice(t *testing.T) {
+	artifactRepo := &stubArtifactRepo{}
+	svc := &knowledgeService{
+		repo: &artifactListKnowledgeRepo{
+			knowledge: &types.Knowledge{ID: "k1", TenantID: 10000, CurrentAttempt: 0},
+		},
+		artifactRepo: artifactRepo,
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+
+	result, err := svc.ListArtifacts(ctx, "k1", types.ArtifactListRequest{})
+	if err != nil {
+		t.Fatalf("ListArtifacts returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil empty slice, got nil")
+	}
+	if len(result) != 0 {
+		t.Errorf("expected 0 items, got %d", len(result))
+	}
+}
+
+// TestListArtifacts_ReturnsMappedItems verifies items of the current attempt
+// are mapped to the API shape.
+func TestListArtifacts_ReturnsMappedItems(t *testing.T) {
+	createdAt := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	artifactRepo := &stubArtifactRepo{
+		listResult: map[int][]types.KnowledgeArtifact{
+			2: {
+				{
+					ArtifactType: types.ArtifactTypeMarkdown,
+					Format:       "markdown",
+					Sha256:       "abc",
+					Size:         10,
+					CreatedAt:    createdAt,
+				},
+				{
+					ArtifactType: types.ArtifactTypeEngineNative,
+					NativeKind:   "mineru",
+					Format:       "json",
+					Sha256:       "def",
+					Size:         20,
+					CreatedAt:    createdAt,
+				},
+			},
+		},
+	}
+	svc := &knowledgeService{
+		repo: &artifactListKnowledgeRepo{
+			knowledge: &types.Knowledge{ID: "k1", TenantID: 10000, CurrentAttempt: 2},
+		},
+		artifactRepo: artifactRepo,
+	}
+	ctx := artifactTestContext(&types.Tenant{ID: 10000})
+
+	result, err := svc.ListArtifacts(ctx, "k1", types.ArtifactListRequest{})
+	if err != nil {
+		t.Fatalf("ListArtifacts returned error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(result))
+	}
+	if len(artifactRepo.listCalls) != 1 || artifactRepo.listCalls[0] != 2 {
+		t.Errorf("expected repo query with current attempt 2, got %v", artifactRepo.listCalls)
+	}
+	md := result[0]
+	if md.ArtifactType != types.ArtifactTypeMarkdown || md.Format != "markdown" || md.Sha256 != "abc" || md.Size != 10 {
+		t.Errorf("unexpected markdown item: %+v", md)
+	}
+	if md.CreatedAt != createdAt.Format(time.RFC3339) {
+		t.Errorf("unexpected created_at: %q", md.CreatedAt)
+	}
+	native := result[1]
+	if native.ArtifactType != types.ArtifactTypeEngineNative || native.NativeKind != "mineru" || native.Size != 20 {
+		t.Errorf("unexpected engine_native item: %+v", native)
 	}
 }
