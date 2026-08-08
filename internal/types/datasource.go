@@ -361,6 +361,10 @@ type FetchedItem struct {
 	// Additional metadata to preserve
 	Metadata map[string]string `json:"metadata"`
 
+	// Whether the connector inspected the item and found no source-side changes.
+	// Skipped items carry identity/metadata only and must not be ingested again.
+	IsSkipped bool `json:"is_skipped"`
+
 	// Whether the item was deleted in the source
 	IsDeleted bool `json:"is_deleted"`
 

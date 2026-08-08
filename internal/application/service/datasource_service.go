@@ -947,7 +947,48 @@ func (s *DataSourceService) applyFetchedItem(
 	ctx context.Context, ds *types.DataSource, item *types.FetchedItem,
 	tagIDs []string, result *types.SyncResult,
 ) {
+	if item.IsSkipped {
+		// The connector inspected the item and found no source-side changes.
+		// Skipped items carry identity/metadata only and must not be ingested.
+		result.Skipped++
+		return
+	}
+
 	if item.IsDeleted {
+		if ds.Type == types.ConnectorTypeCanvas && ds.SyncDeletions {
+			// Canvas: perform real KB deletion, scoped to items owned by this
+			// data source. Other connectors keep the count-only policy below.
+			repo := s.knowledgeService.GetRepository()
+			existing, lookupErr := repo.FindByDataSourceExternalID(
+				ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID,
+			)
+			if lookupErr != nil {
+				result.Failed++
+				recordSyncError(result, types.SyncItemError{
+					Title:   item.Title,
+					Code:    "canvas_deletion_lookup_failed",
+					Message: fmt.Sprintf("%s: find deleted knowledge: %v", item.ExternalID, lookupErr),
+				})
+				return
+			}
+			if existing == nil {
+				// Deletion is idempotent: the source item may already have been
+				// removed manually or by an earlier sync.
+				result.Skipped++
+				return
+			}
+			if deleteErr := s.knowledgeService.DeleteKnowledge(ctx, existing.ID); deleteErr != nil {
+				result.Failed++
+				recordSyncError(result, types.SyncItemError{
+					Title:   item.Title,
+					Code:    "canvas_deletion_failed",
+					Message: fmt.Sprintf("%s: delete knowledge: %v", item.ExternalID, deleteErr),
+				})
+				return
+			}
+			result.Deleted++
+			return
+		}
 		if ds.SyncDeletions {
 			// Count only — actual KB deletion is intentionally not performed.
 			// Users manage knowledge removal explicitly via the KB UI to avoid
@@ -1306,7 +1347,15 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
 	isUpdate := false
 	if item.ExternalID != "" {
 		repo := s.knowledgeService.GetRepository()
-		existing, err := repo.FindByMetadataKey(ctx, ds.TenantID, ds.KnowledgeBaseID, "external_id", item.ExternalID)
+		var existing *types.Knowledge
+		var err error
+		if ds.Type == types.ConnectorTypeCanvas {
+			// Scope the lookup to items owned by this data source so identical
+			// external IDs from two data sources cannot collide.
+			existing, err = repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
+		} else {
+			existing, err = repo.FindByMetadataKey(ctx, ds.TenantID, ds.KnowledgeBaseID, "external_id", item.ExternalID)
+		}
 		if err != nil {
 			logger.Warnf(ctx, "failed to check existing knowledge for external_id=%s: %v", item.ExternalID, err)
 			// Non-fatal: proceed with creation (may produce duplicate)
