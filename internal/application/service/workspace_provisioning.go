@@ -138,6 +138,9 @@ func preflightWorkspaceProvisioning(
 			if model.Type != binding.expected {
 				return nil, fmt.Errorf("policy %s must reference a %s model", binding.field, binding.expected)
 			}
+			if err := validateProvisioningModelProvider(model, effectiveProviders, policy); err != nil {
+				return nil, fmt.Errorf("policy %s is not compliant: %w", binding.field, err)
+			}
 		}
 	}
 
