@@ -186,6 +186,8 @@ type Knowledge struct {
 	ErrorMessage string `json:"error_message"`
 	// Deletion time of the knowledge
 	DeletedAt gorm.DeletedAt `json:"deleted_at"         gorm:"index"`
+	// Current attempt number for parsed artifacts (0 = no artifacts yet)
+	CurrentAttempt int `json:"current_attempt"    gorm:"type:int;not null;default:0"`
 	// Knowledge base name (not stored in database, populated on query)
 	KnowledgeBaseName string `json:"knowledge_base_name" gorm:"-"`
 }

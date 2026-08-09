@@ -1,12 +1,16 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +72,7 @@ type knowledgeService struct {
 	kbShareService  interfaces.KBShareService
 	imageResolver   *docparser.ImageResolver
 	taskPendingRepo interfaces.TaskPendingOpsRepository
+	artifactRepo    interfaces.KnowledgeArtifactRepository
 
 	// In-memory fallbacks for Lite mode (no Redis)
 	memFAQProgress      sync.Map // taskID -> *types.FAQImportProgress
@@ -118,6 +123,7 @@ func NewKnowledgeService(
 	taskPendingRepo interfaces.TaskPendingOpsRepository,
 	spanTracker SpanTracker,
 	audit interfaces.AuditLogService,
+	artifactRepo interfaces.KnowledgeArtifactRepository,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
 		config:          config,
@@ -147,6 +153,7 @@ func NewKnowledgeService(
 		taskPendingRepo: taskPendingRepo,
 		spanTracker:     spanTracker,
 		audit:           audit,
+		artifactRepo:    artifactRepo,
 	}, nil
 }
 
@@ -1063,4 +1070,226 @@ func (s *knowledgeService) SearchKnowledgeForScopes(ctx context.Context, scopes 
 		return nil, false, 0, nil
 	}
 	return s.repo.SearchKnowledgeInScopes(ctx, scopes, keyword, offset, limit, fileTypes)
+}
+
+// --- artifact implementation ---
+
+const artifactSizeInlineLimit = 10 * 1024 * 1024 // 10 MiB
+
+func artifactContentType(f string) string {
+	switch f {
+	case "markdown":
+		return "text/markdown; charset=utf-8"
+	case "json":
+		return "application/json"
+	case "zip":
+		return "application/zip"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+var providerURLRe = regexp.MustCompile(`\b(local|minio|s3|cos|tos|oss)://[^\s)\]>"]+`)
+
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func (s *knowledgeService) resolveImageURLs(ctx context.Context, content string) (string, error) {
+	return providerURLRe.ReplaceAllStringFunc(content, func(match string) string {
+		httpURL, err := s.fileSvc.GetFileURL(ctx, match)
+		if err != nil {
+			logger.Warnf(ctx, "[artifact] failed to resolve image URL %s: %v", match, err)
+			return match
+		}
+		return httpURL
+	}), nil
+}
+
+func (s *knowledgeService) ReadArtifact(ctx context.Context, knowledgeID string, req types.ArtifactReadRequest) (*types.ArtifactReadResponse, error) {
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	if err != nil {
+		return nil, werrors.NewNotFoundError("Knowledge not found")
+	}
+	if knowledge == nil {
+		return nil, werrors.NewNotFoundError("Knowledge not found")
+	}
+
+	if knowledge.IsManual() {
+		meta, err := knowledge.ManualMetadata()
+		if err != nil || meta == nil {
+			return nil, werrors.NewNotFoundError("artifact not found — reparse to generate")
+		}
+		content := meta.Content
+		hash := sha256Hex([]byte(content))
+		return &types.ArtifactReadResponse{
+			KnowledgeID:  knowledgeID,
+			ParseAttempt: meta.Version,
+			Engine:       types.EngineManual,
+			ArtifactType: types.ArtifactTypeMarkdown,
+			Format:       "markdown",
+			Sha256:       hash,
+			Size:         int64(len(content)),
+			Content:      content,
+		}, nil
+	}
+
+	attempt := req.Attempt
+	if attempt <= 0 {
+		attempt = knowledge.CurrentAttempt
+		if attempt <= 0 {
+			return nil, werrors.NewNotFoundError("artifact not found — reparse to generate")
+		}
+	}
+
+	artifact, err := s.artifactRepo.GetArtifactByType(ctx, tenantID, knowledgeID, attempt, req.Type, req.NativeKind)
+	if err != nil {
+		if errors.Is(err, repository.ErrArtifactNotFound) {
+			return nil, werrors.NewNotFoundError("artifact not found — reparse to generate")
+		}
+		return nil, fmt.Errorf("failed to get artifact: %w", err)
+	}
+
+	if artifact.Size > artifactSizeInlineLimit {
+		return nil, werrors.NewBadRequestError("artifact content too large for inline response; use GET /knowledge/{id}/artifact/download instead")
+	}
+
+	reader, err := s.fileSvc.GetFile(ctx, artifact.StorageKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read artifact content: %w", err)
+	}
+	defer reader.Close()
+
+	contentBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read artifact bytes: %w", err)
+	}
+
+	content := string(contentBytes)
+	if req.ResolveImages {
+		resolved, err := s.resolveImageURLs(ctx, content)
+		if err != nil {
+			logger.Warnf(ctx, "Failed to resolve image URLs in artifact: %v", err)
+		} else {
+			content = resolved
+		}
+	}
+
+	return &types.ArtifactReadResponse{
+		KnowledgeID:  knowledgeID,
+		ParseAttempt: artifact.Attempt,
+		Engine:       artifact.Engine,
+		ArtifactType: artifact.ArtifactType,
+		NativeKind:   artifact.NativeKind,
+		Format:       artifact.Format,
+		Sha256:       artifact.Sha256,
+		Size:         artifact.Size,
+		Content:      content,
+	}, nil
+}
+
+func (s *knowledgeService) ListArtifacts(ctx context.Context, knowledgeID string, req types.ArtifactListRequest) ([]types.ArtifactListItem, error) {
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	if err != nil {
+		return nil, werrors.NewNotFoundError("Knowledge not found")
+	}
+	if knowledge == nil {
+		return nil, werrors.NewNotFoundError("Knowledge not found")
+	}
+
+	attempt := req.Attempt
+	if attempt <= 0 {
+		attempt = knowledge.CurrentAttempt
+	}
+	if attempt <= 0 {
+		// Never parsed yet: return an empty (non-nil) slice so the JSON
+		// body is [] instead of null, matching the API contract.
+		return []types.ArtifactListItem{}, nil
+	}
+
+	artifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantID, knowledgeID, attempt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list artifacts: %w", err)
+	}
+
+	result := make([]types.ArtifactListItem, 0, len(artifacts))
+	for _, a := range artifacts {
+		result = append(result, types.ArtifactListItem{
+			ArtifactType: a.ArtifactType,
+			NativeKind:   a.NativeKind,
+			Format:       a.Format,
+			Sha256:       a.Sha256,
+			Size:         a.Size,
+			CreatedAt:    a.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return result, nil
+}
+
+func (s *knowledgeService) DownloadArtifact(ctx context.Context, knowledgeID string, req types.ArtifactReadRequest) (io.ReadCloser, string, error) {
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	if err != nil {
+		return nil, "", werrors.NewNotFoundError("Knowledge not found")
+	}
+	if knowledge == nil {
+		return nil, "", werrors.NewNotFoundError("Knowledge not found")
+	}
+
+	if knowledge.IsManual() {
+		meta, err := knowledge.ManualMetadata()
+		if err != nil || meta == nil {
+			return nil, "", werrors.NewNotFoundError("artifact not found — reparse to generate")
+		}
+		return io.NopCloser(strings.NewReader(meta.Content)), "text/markdown; charset=utf-8", nil
+	}
+
+	attempt := req.Attempt
+	if attempt <= 0 {
+		attempt = knowledge.CurrentAttempt
+		if attempt <= 0 {
+			return nil, "", werrors.NewNotFoundError("artifact not found — reparse to generate")
+		}
+	}
+
+	artifact, err := s.artifactRepo.GetArtifactByType(ctx, tenantID, knowledgeID, attempt, req.Type, req.NativeKind)
+	if err != nil {
+		if errors.Is(err, repository.ErrArtifactNotFound) {
+			return nil, "", werrors.NewNotFoundError("artifact not found — reparse to generate")
+		}
+		return nil, "", fmt.Errorf("failed to get artifact: %w", err)
+	}
+
+	reader, err := s.fileSvc.GetFile(ctx, artifact.StorageKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read artifact content: %w", err)
+	}
+
+	if req.ResolveImages {
+		// Resolving provider:// references to presigned HTTP URLs requires the
+		// full content, so buffer the artifact for this opt-in path only.
+		contentBytes, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			return nil, "", fmt.Errorf("failed to read artifact bytes: %w", readErr)
+		}
+		if closeErr != nil {
+			logger.Warnf(ctx, "Failed to close artifact reader: %v", closeErr)
+		}
+		resolved, resolveErr := s.resolveImageURLs(ctx, string(contentBytes))
+		if resolveErr != nil {
+			logger.Warnf(ctx, "Failed to resolve image URLs in artifact: %v", resolveErr)
+		} else {
+			contentBytes = []byte(resolved)
+		}
+		return io.NopCloser(bytes.NewReader(contentBytes)), artifactContentType(artifact.Format), nil
+	}
+
+	return reader, artifactContentType(artifact.Format), nil
 }

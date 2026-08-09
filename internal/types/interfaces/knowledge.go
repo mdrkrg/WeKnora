@@ -224,6 +224,12 @@ type KnowledgeService interface {
 	SearchKnowledge(ctx context.Context, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, int64, error)
 	// SearchKnowledgeForScopes searches knowledge within the given (tenant_id, kb_id) scopes (e.g. for shared agent context).
 	SearchKnowledgeForScopes(ctx context.Context, scopes []types.KnowledgeSearchScope, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, int64, error)
+	// ReadArtifact returns the content and metadata of a single artifact.
+	ReadArtifact(ctx context.Context, knowledgeID string, req types.ArtifactReadRequest) (*types.ArtifactReadResponse, error)
+	// ListArtifacts returns metadata for all artifacts under a knowledge/attempt.
+	ListArtifacts(ctx context.Context, knowledgeID string, req types.ArtifactListRequest) ([]types.ArtifactListItem, error)
+	// DownloadArtifact streams the full artifact content.
+	DownloadArtifact(ctx context.Context, knowledgeID string, req types.ArtifactReadRequest) (io.ReadCloser, string, error)
 }
 
 // KnowledgeRepository defines the interface for knowledge repositories.
@@ -327,4 +333,15 @@ type KnowledgeRepository interface {
 	GetKnowledgeTags(ctx context.Context, knowledgeIDs []string) (map[string][]*types.KnowledgeTag, error)
 	// DeleteKnowledgeTagRelations deletes all tag relations for a knowledge entry.
 	DeleteKnowledgeTagRelations(ctx context.Context, knowledgeID string) error
+}
+
+// KnowledgeArtifactRepository defines the interface for knowledge artifact storage.
+type KnowledgeArtifactRepository interface {
+	CreateArtifact(ctx context.Context, artifact *types.KnowledgeArtifact) error
+	GetArtifactByType(ctx context.Context, tenantID uint64, knowledgeID string, attempt int, artifactType, nativeKind string) (*types.KnowledgeArtifact, error)
+	ListArtifacts(ctx context.Context, tenantID uint64, knowledgeID string, attempt int) ([]types.KnowledgeArtifact, error)
+	DeleteArtifactsByKnowledgeID(ctx context.Context, tenantID uint64, knowledgeID string) (int64, error)
+	DeleteArtifactsByAttempt(ctx context.Context, tenantID uint64, knowledgeID string, attempt int) (int64, error)
+	DeleteArtifactByType(ctx context.Context, tenantID uint64, knowledgeID string, attempt int, artifactType, nativeKind string) (int64, error)
+	SetCurrentAttempt(ctx context.Context, knowledgeID string, attempt int) error
 }

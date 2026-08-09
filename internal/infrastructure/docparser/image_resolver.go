@@ -60,6 +60,7 @@ type StoredImage struct {
 	OriginalRef string // reference in the original markdown
 	ServingURL  string // provider:// URL (e.g. local://images/xxx.png, minio://bucket/key)
 	MimeType    string
+	Size        int64 // size in bytes of the uploaded image data
 }
 
 // ImageResolver reads images from a DocReader ReadResult (inline bytes only)
@@ -184,6 +185,7 @@ func (r *ImageResolver) saveReferencedImage(
 				OriginalRef: refPath,
 				ServingURL:  cached.ServingURL,
 				MimeType:    cached.MimeType,
+				Size:        cached.Size,
 			}
 			savedRefs[refPath] = stored
 			return stored, true
@@ -209,6 +211,7 @@ func (r *ImageResolver) saveReferencedImage(
 		OriginalRef: refPath,
 		ServingURL:  servingURL,
 		MimeType:    ref.MimeType,
+		Size:        int64(len(ref.ImageData)),
 	}
 	savedRefs[refPath] = stored
 	if ref.Filename != "" {
@@ -401,6 +404,7 @@ func (r *ImageResolver) ResolveHTMLDataURIImages(
 			OriginalRef: "html-img-data-uri",
 			ServingURL:  servingURL,
 			MimeType:    mimeType,
+			Size:        int64(len(data)),
 		})
 		markdown = markdown[:m[0]] + fmt.Sprintf("![image](%s)", servingURL) + markdown[m[1]:]
 		processed++
@@ -540,6 +544,7 @@ func (r *ImageResolver) resolveBareDataURIs(
 			OriginalRef: "bare-data-uri",
 			ServingURL:  servingURL,
 			MimeType:    mimeType,
+			Size:        int64(len(data)),
 		})
 		if insideWrapper {
 			// Inside a broken markdown ref like ![weird]alt](data:...) — replace data URI only
@@ -608,6 +613,7 @@ func (r *ImageResolver) resolveBareBase64Prefix(
 			OriginalRef: "bare-base64",
 			ServingURL:  servingURL,
 			MimeType:    mimeType,
+			Size:        int64(len(data)),
 		})
 		markdown = markdown[:m[0]] + fmt.Sprintf("![image](%s)", servingURL) + markdown[m[1]:]
 		processed++
@@ -740,6 +746,7 @@ func (r *ImageResolver) ResolveDataURIImages(
 			OriginalRef: dataURI,
 			ServingURL:  servingURL,
 			MimeType:    mimeType,
+			Size:        int64(len(data)),
 		})
 		markdown = markdown[:m[4]] + servingURL + markdown[m[5]:]
 		processed++
@@ -760,6 +767,10 @@ type remoteImageResult struct {
 	// entity-encoded value satisfies neither.
 	ServingURL string
 	MimeType   string
+	// Size is the size in bytes of the downloaded image data. It is reported
+	// in the image_manifest even when the bytes are not uploaded (whitelisted
+	// hosts keep serving from their original location).
+	Size int64
 	// KeepOriginalURL marks a whitelisted host. Its bytes are downloaded so that
 	// OCR/caption analysis can run, but it is not uploaded: the image keeps being
 	// served from its original host, reached through the normalized URL.
@@ -797,7 +808,7 @@ func fetchAndStoreRemoteImage(
 	}
 
 	if whitelisted {
-		return &remoteImageResult{MimeType: mimeType, KeepOriginalURL: true}, nil
+		return &remoteImageResult{MimeType: mimeType, Size: int64(len(data)), KeepOriginalURL: true}, nil
 	}
 
 	ext := extFromMime(mimeType)
@@ -811,7 +822,7 @@ func fetchAndStoreRemoteImage(
 	if err != nil {
 		return nil, fmt.Errorf("save: %w", err)
 	}
-	return &remoteImageResult{ServingURL: servingURL, MimeType: mimeType}, nil
+	return &remoteImageResult{ServingURL: servingURL, MimeType: mimeType, Size: int64(len(data))}, nil
 }
 
 // isRemoteHTTPURL reports whether raw is an absolute http(s) URL.
@@ -924,6 +935,7 @@ func resolveRemoteImagePass(
 			OriginalRef: imgURL,
 			ServingURL:  servingURL,
 			MimeType:    res.MimeType,
+			Size:        res.Size,
 		})
 		markdown = markdown[:start] + servingURL + markdown[end:]
 	}

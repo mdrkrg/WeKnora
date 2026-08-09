@@ -343,6 +343,10 @@ type ParserEngineConfig struct {
 	PaddleOCRVLCloudModel               string `json:"paddleocr_vl_cloud_model,omitempty"` // e.g. PaddleOCR-VL-1.6
 	PaddleOCRVLCloudUseSealRecognition  *bool  `json:"paddleocr_vl_cloud_use_seal_recognition,omitempty"`
 	PaddleOCRVLCloudUseChartRecognition *bool  `json:"paddleocr_vl_cloud_use_chart_recognition,omitempty"`
+
+	// EnableEngineNativeArtifacts toggles saving engine-native parsed artifacts
+	// (content_list, middle_json, model_output) alongside canonical artifacts.
+	EnableEngineNativeArtifacts bool `json:"enable_engine_native_artifacts,omitempty"`
 }
 
 const (

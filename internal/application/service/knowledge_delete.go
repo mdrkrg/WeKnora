@@ -156,6 +156,12 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 		return nil
 	})
 
+	// Clean up parsed artifacts (markdown, image_manifest, engine-native)
+	wg.Go(func() error {
+		s.cleanupKnowledgeArtifacts(ctx, tenantID, id)
+		return nil
+	})
+
 	// Delete the knowledge graph
 	wg.Go(func() error {
 		namespace := types.NameSpace{KnowledgeBase: knowledge.KnowledgeBaseID, Knowledge: knowledge.ID}
@@ -201,6 +207,40 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 		"knowledge", knowledge.ID, types.AuditOutcomeSuccess,
 		map[string]any{"title": knowledge.Title, "type": knowledge.Type})
 	return nil
+}
+
+// cleanupKnowledgeArtifacts deletes the parsed-artifact rows and their stored
+// files for a knowledge entry and refunds the tenant quota. Best-effort:
+// failures only leak storage and are logged. Artifacts are always written and
+// read through the global s.fileSvc (see checkQuotaAndSaveArtifact), so cleanup
+// must use the same service instance — a KB-scoped backend may live on a
+// different storage provider and would orphan the files.
+func (s *knowledgeService) cleanupKnowledgeArtifacts(ctx context.Context, tenantID uint64, knowledgeID string) {
+	if s.artifactRepo == nil {
+		return
+	}
+	artifacts, err := s.artifactRepo.ListArtifacts(ctx, tenantID, knowledgeID, 0)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to list artifacts for cleanup: %v", err)
+		return
+	}
+	var totalSize int64
+	for _, a := range artifacts {
+		if a.StorageKey != "" {
+			if err := s.fileSvc.DeleteFile(ctx, a.StorageKey); err != nil {
+				logger.Warnf(ctx, "Failed to delete artifact file %s: %v", a.StorageKey, err)
+			}
+		}
+		totalSize += a.Size
+	}
+	if _, err := s.artifactRepo.DeleteArtifactsByKnowledgeID(ctx, tenantID, knowledgeID); err != nil {
+		logger.Warnf(ctx, "Failed to delete artifact rows: %v", err)
+	}
+	if totalSize > 0 {
+		if err := s.tenantRepo.AdjustStorageUsed(ctx, tenantID, -totalSize); err != nil {
+			logger.Warnf(ctx, "Failed to adjust storage for artifact cleanup: %v", err)
+		}
+	}
 }
 
 // cleanupWikiOnKnowledgeDelete handles wiki pages when a source document is deleted.
@@ -624,6 +664,14 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 		if err := s.graphEngine.DelGraph(ctx, namespaces); err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge graph failed")
 			return err
+		}
+		return nil
+	})
+
+	// Clean up parsed artifacts (rows, files, quota) for every knowledge entry.
+	wg.Go(func() error {
+		for _, knowledge := range knowledgeList {
+			s.cleanupKnowledgeArtifacts(ctx, tenantInfo.ID, knowledge.ID)
 		}
 		return nil
 	})
