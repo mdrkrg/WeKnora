@@ -59,6 +59,7 @@ Provider 回调后端 `/auth/oidc/callback`，后端用 `code` 换 token、拉�
 | `OIDC_AUTH_CLIENT_SECRET` | OIDC Client Secret |
 | `OIDC_AUTH_DISCOVERY_URL` | OIDC Discovery 地址 |
 | `OIDC_AUTH_SCOPES` | Scope 列表，默认 `openid profile email` |
+| `OIDC_AUTH_EMAIL_FALLBACK_DOMAIN` | Provider 不返回 email 时，用 `<sub>@<域名>` 合成占位邮箱的域名。留空则要求 Provider 必须返回邮箱。**安全约束**：启用后强制 `auth.registration_mode=invite_only`，且邀请链接注册拒绝使用该域名邮箱 |
 
 启用时的最小要求：`client_id` + `client_secret` + (`discovery_url` 或 `authorization_endpoint + token_endpoint`)
 
@@ -71,7 +72,7 @@ Provider 回调后端 `/auth/oidc/callback`，后端用 `code` 换 token、拉�
 ## 注意事项
 
 1. **`redirect_uri` 必须严格匹配** Provider 客户端配置
-2. **邮箱是本地账号关联主键** — 若 Provider 没返回 email，将无法完成登录
+2. **邮箱是本地账号关联主键** — 若 Provider 没返回 email，默认无法登录；可设置 `OIDC_AUTH_EMAIL_FALLBACK_DOMAIN` 用 `<sub>@<域名>` 合成占位邮箱（适用于不返回邮箱的 Provider）。合成邮箱未经验证，启用后强制 `invite_only` 并拒绝邀请注册使用该域邮箱，防止预注册劫持
 3. **首次 OIDC 登录会自动创建用户和默认空间**
 4. **真正用于访问 API 的是本地 JWT**，不是 OIDC access token
 
