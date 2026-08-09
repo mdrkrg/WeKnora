@@ -206,8 +206,9 @@ func TestKnowledgeBasePolicyFixesIngestModelsAndRejectsOverride(t *testing.T) {
 	})
 	svc := NewModelPolicyService(&policyModelRepoStub{models: models}, settings)
 
+	// Creation path: an explicit conflict with the fixed binding is rejected.
 	kb := &types.KnowledgeBase{EmbeddingModelID: "other", SummaryModelID: "summary-fixed"}
-	err := svc.ApplyKnowledgeBasePolicy(policyContext(), kb)
+	err := svc.ApplyKnowledgeBasePolicy(types.WithKnowledgeBaseCreationDefaults(policyContext()), kb)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "embedding_model_id is fixed")
 
