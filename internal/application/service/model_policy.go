@@ -122,9 +122,32 @@ func (s *modelPolicyService) PrepareModelForRuntime(
 	if types.IsBackgroundTask(ctx) {
 		fixedID := fixedModelIDForType(policy, model.Type)
 		if fixedID != "" && fixedID != model.ID {
-			err = fmt.Errorf("background %s model is fixed to %s", model.Type, fixedID)
-			if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {
-				return nil, handled
+			// Enforce mode: prefer overriding the stored (possibly pre-policy)
+			// model with the fixed binding so ingestion converges instead of
+			// failing for KBs created before the policy took effect. The
+			// override is logged; when the fixed model itself is unavailable,
+			// fall back to the violation path so a broken binding is not
+			// silently ignored. Off/audit modes never intervene.
+			if policy.Mode == types.ModelPolicyModeEnforce {
+				if fixed, err := s.repo.GetByID(ctx, 0, fixedID); err == nil && fixed != nil &&
+					fixed.Status == types.ModelStatusActive {
+					logger.Warnf(ctx, "[model-policy] background %s model %s overridden by fixed %s",
+						model.Type, model.ID, fixedID)
+					model = fixed
+				} else {
+					if err != nil {
+						logger.Errorf(ctx, "[model-policy] fixed %s model lookup failed: %v", model.Type, err)
+					}
+					err = fmt.Errorf("background %s model is fixed to %s", model.Type, fixedID)
+					if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {
+						return nil, handled
+					}
+				}
+			} else {
+				err = fmt.Errorf("background %s model is fixed to %s", model.Type, fixedID)
+				if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {
+					return nil, handled
+				}
 			}
 		}
 	}

@@ -271,3 +271,59 @@ func TestFixedIngestChatModelDoesNotRestrictInteractiveChat(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "fixed to summary-fixed")
 }
+
+func TestPrepareModelForRuntimeOverridesStoredModelWithFixedBinding(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:        "enforce",
+		settingProviderCatalog:        `[]`,
+		settingFixedIngestEmbeddingID: "builtin-embedding",
+	})
+	fixed := &types.Model{ID: "builtin-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, IsBuiltin: true, Source: types.ModelSourceLocal}
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{"builtin-embedding": fixed}},
+		settings,
+	)
+
+	// Background task requests a pre-policy stored model; enforce mode must
+	// converge to the fixed binding instead of failing ingestion.
+	stored := &types.Model{ID: "legacy-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, Source: types.ModelSourceLocal}
+	prepared, err := svc.PrepareModelForRuntime(types.WithBackgroundTask(policyContext()), stored)
+	require.NoError(t, err)
+	assert.Equal(t, "builtin-embedding", prepared.ID)
+}
+
+func TestPrepareModelForRuntimeRejectsWhenFixedModelUnavailable(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:        "enforce",
+		settingProviderCatalog:        `[]`,
+		settingFixedIngestEmbeddingID: "builtin-missing",
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	stored := &types.Model{ID: "legacy-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, Source: types.ModelSourceLocal}
+	_, err := svc.PrepareModelForRuntime(types.WithBackgroundTask(policyContext()), stored)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fixed to builtin-missing")
+}
+
+func TestPrepareModelForRuntimeDoesNotInterveneOutsideEnforce(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:        "audit",
+		settingProviderCatalog:        `[]`,
+		settingFixedIngestEmbeddingID: "builtin-embedding",
+	})
+	fixed := &types.Model{ID: "builtin-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, IsBuiltin: true, Source: types.ModelSourceLocal}
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{"builtin-embedding": fixed}},
+		settings,
+	)
+
+	// Audit mode records but never overrides: the stored model stays in use.
+	stored := &types.Model{ID: "legacy-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, Source: types.ModelSourceLocal}
+	prepared, err := svc.PrepareModelForRuntime(types.WithBackgroundTask(policyContext()), stored)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-embedding", prepared.ID)
+}
