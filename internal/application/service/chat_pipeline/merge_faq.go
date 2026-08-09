@@ -84,6 +84,17 @@ func (p *PluginMerge) populateFAQAnswers(
 				continue
 			}
 			r.Content = content
+			// The generated answer is not locatable in the source artifact:
+			// reset the stale creation segment to a [0,0) snapshot marker
+			// (spec 3.4.1, generated results).
+			r.ContentSegments = []types.ContentSegment{{
+				Text:        content,
+				ChunkID:     chunk.ID,
+				KnowledgeID: r.KnowledgeID,
+				SourceStart: 0,
+				SourceEnd:   0,
+				ChunkType:   r.ChunkType,
+			}}
 			updated++
 		}
 	}

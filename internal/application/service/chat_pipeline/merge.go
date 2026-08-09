@@ -337,8 +337,10 @@ func (p *PluginMerge) resolveParentChunks(
 			})
 			assignScopedImageInfo(r, scopedImageInfo, r.ID)
 			parentContent := searchutil.PruneMarkdownImagesByImageInfo(parent.Content, r.ImageInfo)
-			r.Content = searchutil.JoinChunkContent(parentContent, r.Content, "\n\n")
+			beforeContent := r.Content
+			r.Content = searchutil.JoinChunkContent(parentContent, beforeContent, "\n\n")
 			r.ContentRewritten = true
+			r.ContentSegments = p.parentExpandSegments(parent, parentContent, beforeContent, r)
 			if !containsID(r.SubChunkID, r.ID) {
 				r.SubChunkID = append(r.SubChunkID, r.ID)
 			}
@@ -367,6 +369,7 @@ func (p *PluginMerge) resolveParentChunks(
 			parentContent := searchutil.PruneMarkdownImagesByImageInfo(contentSource.Content, r.ImageInfo)
 			r.Content = searchutil.JoinChunkContent(parentContent, textContent, "\n\n")
 			r.ContentRewritten = true
+			r.ContentSegments = p.parentImageExpandSegments(contentSource, textParent, parentContent, textContent, r.Content)
 			pipelineInfo(ctx, "Merge", "image_parent_resolve", map[string]interface{}{
 				"child_id":   r.ID,
 				"child_type": r.ChunkType,
@@ -385,8 +388,104 @@ func (p *PluginMerge) resolveParentChunks(
 	return results
 }
 
-// collectScopedTextChildIDs returns text chunk IDs whose image_info should be
-// loaded for parent-child merge scoping.
+// parentExpandSegments builds the segment list for a text child expanded to
+// its parent_text context. The parent segment carries the unpruned parent
+// artifact slice and is emitted only when the parent chunk is range-trusted
+// (spec 3.4.1); the child keeps its own segments. JoinChunkContent's
+// outcome is mirrored: a fully covered side contributes no segment and an
+// overlap-trimmed join trims the child's segments.
+func (p *PluginMerge) parentExpandSegments(
+	parent *types.Chunk, parentContent, childContent string, r *types.SearchResult,
+) []types.ContentSegment {
+	parentSegs := []types.ContentSegment{}
+	if searchutil.ChunkRangeTrusted(parent) {
+		parentSegs = []types.ContentSegment{{
+			Text:        parent.Content,
+			ChunkID:     parent.ID,
+			KnowledgeID: parent.KnowledgeID,
+			SourceStart: parent.StartAt,
+			SourceEnd:   parent.EndAt,
+			ChunkType:   string(parent.ChunkType),
+		}}
+	}
+	childSegs := childSegmentsForParentResolve(r, childContent)
+	return mirrorParentJoin(r.Content, parentContent, childContent, parentSegs, childSegs)
+}
+
+// parentImageExpandSegments builds the segment list for an image child
+// resolved to its text parent (and grandparent) context. Each side's
+// segment carries the unpruned chunk slice and is emitted only when that
+// chunk is range-trusted; the join outcome is mirrored.
+func (p *PluginMerge) parentImageExpandSegments(
+	contentSource, textParent *types.Chunk, parentContent, textContent, joined string,
+) []types.ContentSegment {
+	sourceSegs := []types.ContentSegment{}
+	if searchutil.ChunkRangeTrusted(contentSource) {
+		sourceSegs = []types.ContentSegment{{
+			Text:        contentSource.Content,
+			ChunkID:     contentSource.ID,
+			KnowledgeID: contentSource.KnowledgeID,
+			SourceStart: contentSource.StartAt,
+			SourceEnd:   contentSource.EndAt,
+			ChunkType:   string(contentSource.ChunkType),
+		}}
+	}
+	textSegs := []types.ContentSegment{}
+	if searchutil.ChunkRangeTrusted(textParent) {
+		textSegs = []types.ContentSegment{{
+			Text:        textParent.Content,
+			ChunkID:     textParent.ID,
+			KnowledgeID: textParent.KnowledgeID,
+			SourceStart: textParent.StartAt,
+			SourceEnd:   textParent.EndAt,
+			ChunkType:   string(textParent.ChunkType),
+		}}
+	}
+	return mirrorParentJoin(joined, parentContent, textContent, sourceSegs, textSegs)
+}
+
+// childSegmentsForParentResolve returns the child's own segments, or a
+// [0,0) snapshot marker when the result carried none (e.g. history results).
+func childSegmentsForParentResolve(r *types.SearchResult, childContent string) []types.ContentSegment {
+	if len(r.ContentSegments) > 0 {
+		return r.ContentSegments
+	}
+	return []types.ContentSegment{{
+		Text:        childContent,
+		ChunkID:     r.ID,
+		KnowledgeID: r.KnowledgeID,
+		SourceStart: 0,
+		SourceEnd:   0,
+		ChunkType:   r.ChunkType,
+	}}
+}
+
+// mirrorParentJoin mirrors JoinChunkContent's outcome on a two-part segment
+// list: a fully covered part contributes no segment, an overlap-trimmed
+// join trims the child part's segments, and a full join appends both parts
+// (the synthetic separator belongs to no segment).
+func mirrorParentJoin(
+	joined, parentPart, childPart string, parentSegs, childSegs []types.ContentSegment,
+) []types.ContentSegment {
+	switch joined {
+	case parentPart:
+		return parentSegs
+	case childPart:
+		return childSegs
+	default:
+		appendedLen := runeLen(joined) - runeLen(parentPart)
+		if appendedLen < runeLen(childPart) {
+			trimmed := trimSegmentsFront(childSegs, runeLen(childPart)-appendedLen)
+			out := make([]types.ContentSegment, 0, len(parentSegs)+len(trimmed))
+			out = append(out, parentSegs...)
+			return append(out, trimmed...)
+		}
+		out := make([]types.ContentSegment, 0, len(parentSegs)+len(childSegs))
+		out = append(out, parentSegs...)
+		return append(out, childSegs...)
+	}
+}
+
 func collectScopedTextChildIDs(
 	results []*types.SearchResult,
 	parentMap map[string]*types.Chunk,

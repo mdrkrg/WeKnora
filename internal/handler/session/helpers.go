@@ -221,25 +221,7 @@ func buildStreamResponse(evt interfaces.StreamEvent, requestID string) *types.St
 			searchResults := make([]*types.SearchResult, 0, len(refs))
 			for _, ref := range refs {
 				if refMap, ok := ref.(map[string]interface{}); ok {
-					sr := &types.SearchResult{
-						ID:                   getString(refMap, "id"),
-						Content:              getString(refMap, "content"),
-						KnowledgeID:          getString(refMap, "knowledge_id"),
-						ChunkIndex:           int(getFloat64(refMap, "chunk_index")),
-						KnowledgeTitle:       getString(refMap, "knowledge_title"),
-						StartAt:              int(getFloat64(refMap, "start_at")),
-						EndAt:                int(getFloat64(refMap, "end_at")),
-						Seq:                  int(getFloat64(refMap, "seq")),
-						Score:                getFloat64(refMap, "score"),
-						ChunkType:            getString(refMap, "chunk_type"),
-						ParentChunkID:        getString(refMap, "parent_chunk_id"),
-						ImageInfo:            getString(refMap, "image_info"),
-						KnowledgeFilename:    getString(refMap, "knowledge_filename"),
-						KnowledgeSource:      getString(refMap, "knowledge_source"),
-						KnowledgeDescription: getString(refMap, "knowledge_description"),
-						KnowledgeBaseID:      getString(refMap, "knowledge_base_id"),
-					}
-					searchResults = append(searchResults, sr)
+					searchResults = append(searchResults, searchResultFromMap(refMap))
 				}
 			}
 			response.KnowledgeReferences = types.References(searchResults)
@@ -448,6 +430,66 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return float64(val)
 	}
 	return 0.0
+}
+
+// getContentSegments parses the content_segments array from a map that was
+// serialized/deserialized (e.g., via Redis) instead of round-tripping through
+// *types.SearchResult directly.
+func getContentSegments(m map[string]interface{}) []types.ContentSegment {
+	raw, ok := m["content_segments"].([]interface{})
+	if !ok {
+		return nil
+	}
+	segments := make([]types.ContentSegment, 0, len(raw))
+	for _, item := range raw {
+		segMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		segments = append(segments, types.ContentSegment{
+			Text:        getString(segMap, "text"),
+			ChunkID:     getString(segMap, "chunk_id"),
+			KnowledgeID: getString(segMap, "knowledge_id"),
+			SourceStart: int(getFloat64(segMap, "source_start")),
+			SourceEnd:   int(getFloat64(segMap, "source_end")),
+			ChunkType:   getString(segMap, "chunk_type"),
+		})
+	}
+	return segments
+}
+
+// searchResultFromMap rebuilds a *types.SearchResult from a map that went
+// through JSON/Redis serialization, preserving all fields including metadata.
+func searchResultFromMap(refMap map[string]interface{}) *types.SearchResult {
+	sr := &types.SearchResult{
+		ID:                   getString(refMap, "id"),
+		Content:              getString(refMap, "content"),
+		KnowledgeID:          getString(refMap, "knowledge_id"),
+		ChunkIndex:           int(getFloat64(refMap, "chunk_index")),
+		KnowledgeTitle:       getString(refMap, "knowledge_title"),
+		StartAt:              int(getFloat64(refMap, "start_at")),
+		EndAt:                int(getFloat64(refMap, "end_at")),
+		Seq:                  int(getFloat64(refMap, "seq")),
+		Score:                getFloat64(refMap, "score"),
+		ChunkType:            getString(refMap, "chunk_type"),
+		ParentChunkID:        getString(refMap, "parent_chunk_id"),
+		ImageInfo:            getString(refMap, "image_info"),
+		KnowledgeFilename:    getString(refMap, "knowledge_filename"),
+		KnowledgeSource:      getString(refMap, "knowledge_source"),
+		KnowledgeDescription: getString(refMap, "knowledge_description"),
+		KnowledgeBaseID:      getString(refMap, "knowledge_base_id"),
+		ContentSegments:      getContentSegments(refMap),
+	}
+	if meta, ok := refMap["metadata"].(map[string]interface{}); ok {
+		metadata := make(map[string]string)
+		for k, v := range meta {
+			if strVal, ok := v.(string); ok {
+				metadata[k] = strVal
+			}
+		}
+		sr.Metadata = metadata
+	}
+	return sr
 }
 
 // createDefaultSummaryConfig and fillSummaryConfigDefaults used to build

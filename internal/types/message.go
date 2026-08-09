@@ -35,6 +35,13 @@ type MentionedItem struct {
 	SkillName string `json:"skill_name"` // Preloaded agent skill name
 }
 
+// HistoryMessage represents a single message in the conversation history
+// passed by knowledge retrieve requests for multi-turn query rewriting.
+type HistoryMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // MessageImage represents an image attached to a chat message
 type MessageImage struct {
 	URL     string `json:"url"`
