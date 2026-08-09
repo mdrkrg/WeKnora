@@ -222,6 +222,25 @@ func (s *modelPolicyService) ApplyKnowledgeBasePolicy(
 		if !embeddingWasExplicit && policy.FixedIngestEmbeddingID != "" {
 			kb.EmbeddingModelID = policy.FixedIngestEmbeddingID
 		}
+		// Non-creation paths (update/copy/duplicate) converge a stored model
+		// that differs from the fixed binding instead of rejecting the whole
+		// save with a 400: pre-policy KBs keep editing smoothly and their
+		// ingest models align with the binding, mirroring the worker-side
+		// convergence in PrepareModelForRuntime. Explicit conflicts on the
+		// creation path still fail closed.
+		if !types.IsKnowledgeBaseCreationDefaults(ctx) {
+			if policy.FixedIngestSummaryID != "" && strings.TrimSpace(kb.SummaryModelID) != policy.FixedIngestSummaryID {
+				logger.Warnf(ctx, "[model-policy] KB %s summary model %q converged to fixed %s",
+					kb.ID, kb.SummaryModelID, policy.FixedIngestSummaryID)
+				kb.SummaryModelID = policy.FixedIngestSummaryID
+			}
+			if policy.FixedIngestEmbeddingID != "" &&
+				strings.TrimSpace(kb.EmbeddingModelID) != policy.FixedIngestEmbeddingID {
+				logger.Warnf(ctx, "[model-policy] KB %s embedding model %q converged to fixed %s",
+					kb.ID, kb.EmbeddingModelID, policy.FixedIngestEmbeddingID)
+				kb.EmbeddingModelID = policy.FixedIngestEmbeddingID
+			}
+		}
 	}
 	if s.workspaceProvisioning != nil && s.workspaceProvisioning.Enabled {
 		if !summaryWasExplicit && !(policy.Mode == types.ModelPolicyModeEnforce && policy.FixedIngestSummaryID != "") {

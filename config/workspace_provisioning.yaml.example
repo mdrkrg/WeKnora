@@ -45,9 +45,10 @@ defaults:
 # OPERATIONAL NOTES (enforce mode):
 # - Enable the manifest on a deployment that starts enforcing from day one.
 #   KBs created before enforce keep their stored ingest models; ingestion
-#   converges to the fixed bindings automatically (logged as warnings), so
-#   no per-KB migration is required. KBs that explicitly request a different
-#   ingest model are still rejected.
+#   converges to the fixed bindings automatically (logged as warnings), and
+#   editing such KBs converges their stored models too — no per-KB migration
+#   is required. Only KB creation with an explicit conflicting model is
+#   rejected.
 # - The provider catalog must list every remote model provider in use.
 #   With an empty or incomplete catalog, enforce rejects models whose
 #   provider is not approved — including interactive chat calls.

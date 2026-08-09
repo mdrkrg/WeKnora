@@ -354,3 +354,52 @@ func TestWorkspaceProvisioningKnowledgeBasePolicyRejectsUnavailableDefault(t *te
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "default chat model is unavailable")
 }
+
+func TestWorkspaceProvisioningKnowledgeBasePolicyConvergesStoredModelOnUpdate(t *testing.T) {
+	cfg := workspaceProvisioningTestConfig()
+	svc := NewModelPolicyServiceWithWorkspaceProvisioning(
+		&policyModelRepoStub{models: map[string]*types.Model{
+			"builtin-chat":      provisioningTestModel("builtin-chat", types.ModelTypeKnowledgeQA, 0),
+			"builtin-embedding": provisioningTestModel("builtin-embedding", types.ModelTypeEmbedding, 4096),
+		}},
+		provisioningEnabledSettingsStub(),
+		cfg,
+	).(*modelPolicyService)
+
+	// Update path of a pre-policy KB: the stored embedding model differs from
+	// the fixed binding; enforce must converge instead of rejecting the save.
+	// The manifest fixes only the embedding binding, so the summary model is
+	// left untouched (no binding to converge to).
+	legacyChat := provisioningTestModel("legacy-chat", types.ModelTypeKnowledgeQA, 0)
+	legacyEmbed := provisioningTestModel("legacy-embed", types.ModelTypeEmbedding, 4096)
+	svc.repo = &policyModelRepoStub{models: map[string]*types.Model{
+		"legacy-chat":       legacyChat,
+		"legacy-embed":      legacyEmbed,
+		"builtin-chat":      provisioningTestModel("builtin-chat", types.ModelTypeKnowledgeQA, 0),
+		"builtin-embedding": provisioningTestModel("builtin-embedding", types.ModelTypeEmbedding, 4096),
+	}}
+	kb := &types.KnowledgeBase{ID: "kb-pre-policy", SummaryModelID: "legacy-chat", EmbeddingModelID: "legacy-embed"}
+	err := svc.ApplyKnowledgeBasePolicy(policyContext(), kb)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-chat", kb.SummaryModelID)
+	assert.Equal(t, "builtin-embedding", kb.EmbeddingModelID)
+}
+
+func TestWorkspaceProvisioningKnowledgeBasePolicyRejectsExplicitConflictOnCreate(t *testing.T) {
+	cfg := workspaceProvisioningTestConfig()
+	svc := NewModelPolicyServiceWithWorkspaceProvisioning(
+		&policyModelRepoStub{models: map[string]*types.Model{
+			"builtin-chat":      provisioningTestModel("builtin-chat", types.ModelTypeKnowledgeQA, 0),
+			"builtin-embedding": provisioningTestModel("builtin-embedding", types.ModelTypeEmbedding, 4096),
+		}},
+		provisioningEnabledSettingsStub(),
+		cfg,
+	).(*modelPolicyService)
+
+	// Creation path keeps fail-closed semantics: an explicit model that
+	// conflicts with the fixed binding is rejected.
+	kb := &types.KnowledgeBase{SummaryModelID: "other-chat", EmbeddingModelID: "other-embed"}
+	err := svc.ApplyKnowledgeBasePolicy(types.WithKnowledgeBaseCreationDefaults(policyContext()), kb)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fixed by platform policy")
+}
