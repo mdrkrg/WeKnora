@@ -202,7 +202,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewEvaluationService))
 	must(container.Provide(service.NewUserService))
 	must(container.Provide(service.NewSystemSettingService))
-	must(container.Provide(service.NewModelPolicyService))
+	must(container.Provide(loadWorkspaceProvisioningConfig))
+	must(container.Provide(service.NewModelPolicyServiceWithWorkspaceProvisioning))
+	must(container.Invoke(initializeWorkspaceProvisioning))
 	must(container.Provide(service.NewWeKnoraCloudService))
 
 	// Extract services - register individual extracters with names
@@ -560,6 +562,25 @@ func initRedisClient() (*redis.Client, error) {
 	}
 
 	return client, nil
+}
+
+// loadWorkspaceProvisioningConfig reads the optional deployment manifest.
+// A missing file returns a disabled config (feature off by default).
+func loadWorkspaceProvisioningConfig() (*types.WorkspaceProvisioningConfig, error) {
+	return types.LoadWorkspaceProvisioningConfig(config.ConfigDir())
+}
+
+// initializeWorkspaceProvisioning preflights and reconciles deployment-owned
+// providers and the governance policy at startup. Failures abort startup so
+// a broken manifest cannot silently leave an unhealthy deployment.
+func initializeWorkspaceProvisioning(
+	modelRepo interfaces.ModelRepository,
+	modelPolicy interfaces.ModelPolicyService,
+	cfg *types.WorkspaceProvisioningConfig,
+) error {
+	return service.InitializeWorkspaceProvisioning(
+		context.Background(), modelRepo, modelPolicy, cfg,
+	)
 }
 
 // initDatabase initializes database connection

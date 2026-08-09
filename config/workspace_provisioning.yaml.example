@@ -1,0 +1,55 @@
+# config/workspace_provisioning.yaml — deployment-owned platform configuration.
+#
+# Copy to config/workspace_provisioning.yaml (or point
+# WEKNORA_WORKSPACE_PROVISIONING_CONFIG at a custom path) and set enabled: true
+# to activate. While enabled, the provider catalog and the governance policy
+# are owned by this manifest: they are reconciled on every startup and
+# runtime modifications are rejected.
+#
+# Values may reference environment variables with ${NAME}; unset or empty
+# variables fail the load (strict mode).
+#
+# Builtin models themselves are NOT declared here — they keep their upstream
+# lifecycle in config/builtin_models.yaml. This manifest only references
+# model IDs (defaults + policy bindings).
+
+version: 1
+enabled: false
+
+# Deployment-approved provider catalog. When enabled, this list REPLACES any
+# catalog previously managed through runtime APIs.
+providers:
+  # - id: internal
+  #   display_name: Internal API
+  #   adapter: generic
+  #   base_url: ${INTERNAL_LLM_BASE_URL}
+  #   approved: true
+  #   allow_custom_base_url: false
+  #   model_types: [KnowledgeQA, Embedding]
+
+# Defaults applied only to newly created tenant resources (workspace, KB,
+# agent). Explicit user choices always win over these defaults.
+defaults:
+  chat_model_id: builtin-llm-default
+  embedding_model_id: builtin-embedding-default
+  rerank_model_id: builtin-rerank-default
+  parser_profile:
+    id: deploy-default
+    engine: mineru
+    file_types: [pdf, docx, pptx]
+
+# Governance policy, deployment-owned. Present while enabled, this becomes
+# the effective ModelGovernancePolicy (fixed ingestion bindings and the
+# locked parser profile). References must be existing active builtin models.
+policy:
+  mode: enforce
+  require_explicit_provider: true
+  fixed_ingest_embedding_id: builtin-embedding-default
+  fixed_ingest_summary_id: ""
+  fixed_ingest_vlm_id: ""
+  fixed_ingest_asr_id: ""
+  parser_profile:
+    id: deploy-locked-parser
+    engine: mineru
+    file_types: [pdf, docx]
+    locked_override_keys: []

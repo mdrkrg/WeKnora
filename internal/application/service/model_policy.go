@@ -30,8 +30,9 @@ const (
 var platformProviderIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 type modelPolicyService struct {
-	repo     interfaces.ModelRepository
-	settings interfaces.SystemSettingService
+	repo                  interfaces.ModelRepository
+	settings              interfaces.SystemSettingService
+	workspaceProvisioning *types.WorkspaceProvisioningConfig
 }
 
 func NewModelPolicyService(
@@ -41,7 +42,29 @@ func NewModelPolicyService(
 	return &modelPolicyService{repo: repo, settings: settings}
 }
 
+// NewModelPolicyServiceWithWorkspaceProvisioning wires deployment defaults
+// into the existing governance service. The ordinary constructor remains for
+// compatibility and behaves exactly as before when provisioning is disabled.
+func NewModelPolicyServiceWithWorkspaceProvisioning(
+	repo interfaces.ModelRepository,
+	settings interfaces.SystemSettingService,
+	workspaceProvisioning *types.WorkspaceProvisioningConfig,
+) interfaces.ModelPolicyService {
+	return &modelPolicyService{
+		repo:                  repo,
+		settings:              settings,
+		workspaceProvisioning: workspaceProvisioning,
+	}
+}
+
 func (s *modelPolicyService) GetPolicy(ctx context.Context) (*types.ModelGovernancePolicy, error) {
+	// The deployment manifest is the authoritative policy source while
+	// workspace provisioning is enabled; the settings KV is a fallback for
+	// deployments without a manifest (and for unit tests).
+	if s != nil && s.workspaceProvisioning != nil && s.workspaceProvisioning.Enabled &&
+		s.workspaceProvisioning.Policy != nil {
+		return s.workspaceProvisioning.Policy, nil
+	}
 	if s == nil || s.settings == nil {
 		return &types.ModelGovernancePolicy{Mode: types.ModelPolicyModeOff}, nil
 	}
@@ -136,6 +159,9 @@ func (s *modelPolicyService) FilterModelsForCaller(
 			result = append(result, model)
 		}
 	}
+	if tenantID, ok := types.TenantIDFromContext(ctx); ok && s.workspaceProvisioning != nil {
+		s.workspaceProvisioning.ApplyModelDefaults(result, tenantID)
+	}
 	return result
 }
 
@@ -149,6 +175,41 @@ func (s *modelPolicyService) ApplyKnowledgeBasePolicy(
 	policy, err := s.GetPolicy(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Remember what the caller actually supplied. Deployment defaults are
+	// overridable, while explicit values must still conflict with enforce-mode
+	// fixed bindings exactly as they did before this feature.
+	summaryWasExplicit := strings.TrimSpace(kb.SummaryModelID) != ""
+	embeddingWasExplicit := strings.TrimSpace(kb.EmbeddingModelID) != ""
+	originalParserRules := cloneParserRules(kb.ChunkingConfig.ParserEngineRules)
+	if s.workspaceProvisioning != nil {
+		s.workspaceProvisioning.ApplyKnowledgeBaseDefaults(kb)
+	}
+	if policy.Mode == types.ModelPolicyModeEnforce {
+		if !summaryWasExplicit && policy.FixedIngestSummaryID != "" {
+			kb.SummaryModelID = policy.FixedIngestSummaryID
+		}
+		if !embeddingWasExplicit && policy.FixedIngestEmbeddingID != "" {
+			kb.EmbeddingModelID = policy.FixedIngestEmbeddingID
+		}
+	}
+	if s.workspaceProvisioning != nil && s.workspaceProvisioning.Enabled {
+		if !summaryWasExplicit && !(policy.Mode == types.ModelPolicyModeEnforce && policy.FixedIngestSummaryID != "") {
+			if err := s.validateWorkspaceDefaultReference(
+				ctx, "chat", kb.SummaryModelID, types.ModelTypeKnowledgeQA,
+			); err != nil {
+				return err
+			}
+		}
+		if kb.NeedsEmbeddingModel() && !embeddingWasExplicit &&
+			!(policy.Mode == types.ModelPolicyModeEnforce && policy.FixedIngestEmbeddingID != "") {
+			if err := s.validateWorkspaceDefaultReference(
+				ctx, "embedding", kb.EmbeddingModelID, types.ModelTypeEmbedding,
+			); err != nil {
+				return err
+			}
+		}
 	}
 
 	bindings := []struct {
@@ -182,7 +243,10 @@ func (s *modelPolicyService) ApplyKnowledgeBasePolicy(
 	}
 
 	if policy.ParserProfile != nil {
-		if err := validateParserRules(kb.ChunkingConfig.ParserEngineRules, policy.ParserProfile); err != nil {
+		// Validate only the caller-supplied rules. Defaults may intentionally be
+		// superseded by a higher-priority fixed profile and must not be reported
+		// as a user conflict.
+		if err := validateParserRules(originalParserRules, policy.ParserProfile); err != nil {
 			if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {
 				return handled
 			}
@@ -194,6 +258,19 @@ func (s *modelPolicyService) ApplyKnowledgeBasePolicy(
 		}
 	}
 	return nil
+}
+
+// validateWorkspaceDefaultReference checks a KB model reference filled from
+// manifest defaults; see validateWorkspaceDefaultModel.
+func (s *modelPolicyService) validateWorkspaceDefaultReference(
+	ctx context.Context,
+	purpose string,
+	id string,
+	expected types.ModelType,
+) error {
+	return validateWorkspaceDefaultModel(
+		ctx, s.repo, s, 0, purpose, id, expected, true, true,
+	)
 }
 
 func (s *modelPolicyService) ValidateProcessOverrides(
@@ -433,6 +510,19 @@ func (s *modelPolicyService) loadProviderCatalog(ctx context.Context) ([]types.P
 	return items, nil
 }
 
+// replacePlatformProviders writes the complete deployment-owned catalog. It
+// intentionally removes runtime-created rows while YAML provisioning is
+// enabled so the catalog cannot have two competing configuration sources.
+func (s *modelPolicyService) replacePlatformProviders(
+	ctx context.Context,
+	configured []types.PlatformModelProvider,
+) error {
+	if s == nil || s.settings == nil {
+		return fmt.Errorf("system settings service is unavailable")
+	}
+	return s.saveProviderCatalog(ctx, configured)
+}
+
 func (s *modelPolicyService) saveProviderCatalog(ctx context.Context, items []types.PlatformModelProvider) error {
 	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	raw, err := json.Marshal(items)
@@ -576,6 +666,18 @@ func applyFixedParserRules(rules []types.ParserEngineRule, profile *types.Parser
 		FileTypes: append([]string(nil), profile.FileTypes...),
 		Engine:    profile.Engine,
 	})
+	return result
+}
+
+func cloneParserRules(rules []types.ParserEngineRule) []types.ParserEngineRule {
+	if rules == nil {
+		return nil
+	}
+	result := make([]types.ParserEngineRule, len(rules))
+	for i := range rules {
+		result[i] = rules[i]
+		result[i].FileTypes = append([]string(nil), rules[i].FileTypes...)
+	}
 	return result
 }
 
