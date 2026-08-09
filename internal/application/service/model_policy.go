@@ -130,13 +130,22 @@ func (s *modelPolicyService) PrepareModelForRuntime(
 			// silently ignored. Off/audit modes never intervene.
 			if policy.Mode == types.ModelPolicyModeEnforce {
 				if fixed, err := s.repo.GetByID(ctx, 0, fixedID); err == nil && fixed != nil &&
-					fixed.Status == types.ModelStatusActive {
+					fixed.Status == types.ModelStatusActive &&
+					fixed.Type == model.Type &&
+					(model.Type != types.ModelTypeEmbedding || fixed.Parameters.EmbeddingParameters.Dimension > 0) {
 					logger.Warnf(ctx, "[model-policy] background %s model %s overridden by fixed %s",
 						model.Type, model.ID, fixedID)
 					model = fixed
 				} else {
 					if err != nil {
 						logger.Errorf(ctx, "[model-policy] fixed %s model lookup failed: %v", model.Type, err)
+					} else if fixed != nil {
+						// The binding exists but cannot serve this purpose
+						// (wrong type or unusable embedding dimension): a
+						// misconfigured binding must fail loudly, never be
+						// substituted silently.
+						logger.Errorf(ctx, "[model-policy] fixed %s model %s is unusable for %s substitution",
+							model.Type, fixedID, model.Type)
 					}
 					err = fmt.Errorf("background %s model is fixed to %s", model.Type, fixedID)
 					if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {

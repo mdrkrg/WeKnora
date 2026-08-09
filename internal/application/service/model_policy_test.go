@@ -279,7 +279,7 @@ func TestPrepareModelForRuntimeOverridesStoredModelWithFixedBinding(t *testing.T
 		settingProviderCatalog:        `[]`,
 		settingFixedIngestEmbeddingID: "builtin-embedding",
 	})
-	fixed := &types.Model{ID: "builtin-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, IsBuiltin: true, Source: types.ModelSourceLocal}
+	fixed := &types.Model{ID: "builtin-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, IsBuiltin: true, Source: types.ModelSourceLocal, Parameters: types.ModelParameters{EmbeddingParameters: types.EmbeddingParameters{Dimension: 4096}}}
 	svc := NewModelPolicyService(
 		&policyModelRepoStub{models: map[string]*types.Model{"builtin-embedding": fixed}},
 		settings,
