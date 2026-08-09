@@ -316,17 +316,25 @@ func (s *modelPolicyService) ValidateProcessOverrides(
 		return err
 	}
 
-	if overrides.VLMConfig != nil && overrides.VLMConfig.ModelID != "" {
+	// Validation only: the local copy keeps applyModelBinding from mutating the
+	// caller's overrides in audit mode. Actual enforce-mode assignment happens
+	// later in the worker via ApplyEffectiveProcessPolicy. A binding that is
+	// enabled but left empty while the platform fixed a model is treated as
+	// required, so enforce cannot silently run the override without the fixed
+	// model.
+	if overrides.VLMConfig != nil &&
+		(overrides.VLMConfig.ModelID != "" || (overrides.VLMConfig.Enabled && policy.FixedIngestVLMID != "")) {
 		requested := overrides.VLMConfig.ModelID
 		if err := s.applyModelBinding(ctx, policy, "process_config.vlm_config.model_id", &requested,
-			policy.FixedIngestVLMID, types.ModelTypeVLLM, overrides.VLMConfig.Enabled); err != nil {
+			policy.FixedIngestVLMID, types.ModelTypeVLLM, overrides.VLMConfig.ModelID == ""); err != nil {
 			return err
 		}
 	}
-	if overrides.ASRConfig != nil && overrides.ASRConfig.ModelID != "" {
+	if overrides.ASRConfig != nil &&
+		(overrides.ASRConfig.ModelID != "" || (overrides.ASRConfig.Enabled && policy.FixedIngestASRID != "")) {
 		requested := overrides.ASRConfig.ModelID
 		if err := s.applyModelBinding(ctx, policy, "process_config.asr_config.model_id", &requested,
-			policy.FixedIngestASRID, types.ModelTypeASR, overrides.ASRConfig.Enabled); err != nil {
+			policy.FixedIngestASRID, types.ModelTypeASR, overrides.ASRConfig.ModelID == ""); err != nil {
 			return err
 		}
 	}

@@ -327,3 +327,42 @@ func TestPrepareModelForRuntimeDoesNotInterveneOutsideEnforce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "legacy-embedding", prepared.ID)
 }
+
+func TestValidateProcessOverridesRequiresFixedVLMWhenEnabledAndEmpty(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:  "enforce",
+		settingProviderCatalog:  `[]`,
+		settingFixedIngestVLMID: "builtin-vlm",
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	overrides := &types.KnowledgeProcessOverrides{
+		VLMConfig: &types.VLMConfig{Enabled: true, ModelID: ""},
+	}
+	err := svc.ValidateProcessOverrides(policyContext(), &types.KnowledgeBase{}, overrides, []string{"pdf"})
+	// Previously the empty ModelID skipped validation entirely. Enforce mode
+	// now resolves the enabled-but-empty binding to the fixed model and
+	// verifies its availability.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "references an unavailable model")
+}
+
+func TestValidateProcessOverridesAllowsEnabledEmptyWithoutFixedBinding(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode: "enforce",
+		settingProviderCatalog: `[]`,
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	overrides := &types.KnowledgeProcessOverrides{
+		VLMConfig: &types.VLMConfig{Enabled: true, ModelID: ""},
+	}
+	err := svc.ValidateProcessOverrides(policyContext(), &types.KnowledgeBase{}, overrides, []string{"pdf"})
+	require.NoError(t, err)
+}
