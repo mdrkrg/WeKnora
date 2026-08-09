@@ -184,7 +184,13 @@ func (s *modelPolicyService) ApplyKnowledgeBasePolicy(
 	embeddingWasExplicit := strings.TrimSpace(kb.EmbeddingModelID) != ""
 	originalParserRules := cloneParserRules(kb.ChunkingConfig.ParserEngineRules)
 	if s.workspaceProvisioning != nil {
-		s.workspaceProvisioning.ApplyKnowledgeBaseDefaults(kb)
+		s.workspaceProvisioning.ApplyKnowledgeBaseModelDefaults(kb)
+		if types.IsKnowledgeBaseCreationDefaults(ctx) {
+			// Default parser rules apply only to creation: re-applying on every
+			// save would silently converge pre-existing KBs to the manifest
+			// parser. Copy/duplicate inherit the source rules and skip this.
+			s.workspaceProvisioning.ApplyKnowledgeBaseParserDefaults(kb)
+		}
 	}
 	if policy.Mode == types.ModelPolicyModeEnforce {
 		if !summaryWasExplicit && policy.FixedIngestSummaryID != "" {

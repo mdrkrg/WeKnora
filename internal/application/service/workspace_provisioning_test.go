@@ -271,16 +271,34 @@ func TestWorkspaceProvisioningKnowledgeBasePolicyAppliesDefaultsThenFixings(t *t
 	).(*modelPolicyService)
 
 	kb := &types.KnowledgeBase{}
-	err := svc.ApplyKnowledgeBasePolicy(policyContext(), kb)
+	// Creation path: default model fields AND default parser rules apply.
+	err := svc.ApplyKnowledgeBasePolicy(types.WithKnowledgeBaseCreationDefaults(policyContext()), kb)
 	require.NoError(t, err)
-	// Defaults fill empty fields.
 	assert.Equal(t, "builtin-chat", kb.SummaryModelID)
 	assert.Equal(t, "builtin-embedding", kb.EmbeddingModelID)
-	// Fixed binding wins over defaults in enforce mode.
-	assert.Equal(t, "builtin-embedding", kb.EmbeddingModelID)
-	// Default parser rule added for the configured file type.
 	require.NotEmpty(t, kb.ChunkingConfig.ParserEngineRules)
 	assert.Equal(t, "mineru", kb.ChunkingConfig.ParserEngineRules[0].Engine)
+}
+
+func TestWorkspaceProvisioningKnowledgeBasePolicySkipsParserDefaultsOnUpdate(t *testing.T) {
+	cfg := workspaceProvisioningTestConfig()
+	svc := NewModelPolicyServiceWithWorkspaceProvisioning(
+		&policyModelRepoStub{models: map[string]*types.Model{
+			"builtin-chat":      provisioningTestModel("builtin-chat", types.ModelTypeKnowledgeQA, 0),
+			"builtin-embedding": provisioningTestModel("builtin-embedding", types.ModelTypeEmbedding, 4096),
+		}},
+		provisioningEnabledSettingsStub(),
+		cfg,
+	).(*modelPolicyService)
+
+	kb := &types.KnowledgeBase{}
+	// Update path (no creation marker): model defaults still fill empty
+	// fields, but default parser rules are NOT appended — pre-existing KBs
+	// must not silently converge to the deployment parser.
+	err := svc.ApplyKnowledgeBasePolicy(policyContext(), kb)
+	require.NoError(t, err)
+	assert.Equal(t, "builtin-chat", kb.SummaryModelID)
+	assert.Empty(t, kb.ChunkingConfig.ParserEngineRules)
 }
 
 func TestWorkspaceProvisioningKnowledgeBasePolicyKeepsExplicitChoices(t *testing.T) {

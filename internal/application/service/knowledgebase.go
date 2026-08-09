@@ -156,6 +156,9 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 		}
 	}
 	if s.modelPolicy != nil {
+		// Creation path: manifest default parser rules apply; update paths
+		// must not converge pre-existing KBs to the deployment defaults.
+		ctx = types.WithKnowledgeBaseCreationDefaults(ctx)
 		if err := s.modelPolicy.ApplyKnowledgeBasePolicy(ctx, kb); err != nil {
 			return nil, err
 		}

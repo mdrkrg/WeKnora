@@ -233,9 +233,10 @@ func (cfg *WorkspaceProvisioningConfig) ApplyTenantDefaults(tenant *Tenant) {
 	}
 }
 
-// ApplyKnowledgeBaseDefaults applies overridable model/parser defaults. Fixed
-// governance policy is applied afterwards by ModelPolicyService.
-func (cfg *WorkspaceProvisioningConfig) ApplyKnowledgeBaseDefaults(kb *KnowledgeBase) {
+// ApplyKnowledgeBaseModelDefaults fills empty creation-time model fields on a
+// knowledge base. It runs on every KB save path (create and update) — empty
+// fields are benign to fill, and fixed governance bindings override afterwards.
+func (cfg *WorkspaceProvisioningConfig) ApplyKnowledgeBaseModelDefaults(kb *KnowledgeBase) {
 	if cfg == nil || !cfg.Enabled || kb == nil {
 		return
 	}
@@ -244,6 +245,17 @@ func (cfg *WorkspaceProvisioningConfig) ApplyKnowledgeBaseDefaults(kb *Knowledge
 	}
 	if kb.NeedsEmbeddingModel() && strings.TrimSpace(kb.EmbeddingModelID) == "" {
 		kb.EmbeddingModelID = cfg.Defaults.EmbeddingModelID
+	}
+}
+
+// ApplyKnowledgeBaseParserDefaults appends the deployment default parser rule
+// for file types the KB does not yet cover. It must run only on creation
+// paths: re-applying it on every update would silently converge pre-existing
+// KBs to the manifest default parser. Copy/duplicate inherit the source KB's
+// rules and deliberately skip this.
+func (cfg *WorkspaceProvisioningConfig) ApplyKnowledgeBaseParserDefaults(kb *KnowledgeBase) {
+	if cfg == nil || !cfg.Enabled || kb == nil {
+		return
 	}
 	profile := cfg.Defaults.ParserProfile
 	if profile == nil {

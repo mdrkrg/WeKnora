@@ -539,6 +539,9 @@ func (h *InitializationHandler) InitializeByKB(c *gin.Context) {
 
 	h.applyKnowledgeBaseInitialization(kb, req, processedModels)
 	if h.modelPolicy != nil {
+		// Initialization configures a freshly created KB: default parser rules
+		// apply here, but not on later UpdateKBConfig saves.
+		ctx = types.WithKnowledgeBaseCreationDefaults(ctx)
 		if err := h.modelPolicy.ApplyKnowledgeBasePolicy(ctx, kb); err != nil {
 			c.Error(err)
 			return
