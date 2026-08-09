@@ -343,6 +343,12 @@ func (s *modelPolicyService) ValidateProcessOverrides(
 	// model.
 	if overrides.VLMConfig != nil &&
 		(overrides.VLMConfig.ModelID != "" || (overrides.VLMConfig.Enabled && policy.FixedIngestVLMID != "")) {
+		if overrides.VLMConfig.ModelID == "" && policy.FixedIngestVLMID != "" && policy.Mode != types.ModelPolicyModeEnforce {
+			// Audit visibility for an enabled-but-empty binding that enforce
+			// would resolve to the fixed model.
+			logger.Warnf(ctx, "[model-policy] enabled vlm_config without model_id resolves to fixed %s in enforce mode",
+				policy.FixedIngestVLMID)
+		}
 		requested := overrides.VLMConfig.ModelID
 		if err := s.applyModelBinding(ctx, policy, "process_config.vlm_config.model_id", &requested,
 			policy.FixedIngestVLMID, types.ModelTypeVLLM, overrides.VLMConfig.ModelID == ""); err != nil {
