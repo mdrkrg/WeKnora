@@ -57,6 +57,7 @@ type InitializationHandler struct {
 	config           *config.Config
 	tenantService    interfaces.TenantService
 	modelService     interfaces.ModelService
+	modelPolicy      interfaces.ModelPolicyService
 	kbService        interfaces.KnowledgeBaseService
 	kbRepository     interfaces.KnowledgeBaseRepository
 	knowledgeService interfaces.KnowledgeService
@@ -71,6 +72,7 @@ func NewInitializationHandler(
 	config *config.Config,
 	tenantService interfaces.TenantService,
 	modelService interfaces.ModelService,
+	modelPolicy interfaces.ModelPolicyService,
 	kbService interfaces.KnowledgeBaseService,
 	kbRepository interfaces.KnowledgeBaseRepository,
 	knowledgeService interfaces.KnowledgeService,
@@ -83,6 +85,7 @@ func NewInitializationHandler(
 		config:           config,
 		tenantService:    tenantService,
 		modelService:     modelService,
+		modelPolicy:      modelPolicy,
 		kbService:        kbService,
 		kbRepository:     kbRepository,
 		knowledgeService: knowledgeService,
@@ -467,6 +470,12 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 		c.Error(err)
 		return
 	}
+	if h.modelPolicy != nil {
+		if err := h.modelPolicy.ApplyKnowledgeBasePolicy(ctx, kb); err != nil {
+			c.Error(err)
+			return
+		}
+	}
 
 	// 保存更新后的知识库
 	if err := h.kbRepository.UpdateKnowledgeBase(ctx, kb); err != nil {
@@ -529,6 +538,12 @@ func (h *InitializationHandler) InitializeByKB(c *gin.Context) {
 	}
 
 	h.applyKnowledgeBaseInitialization(kb, req, processedModels)
+	if h.modelPolicy != nil {
+		if err := h.modelPolicy.ApplyKnowledgeBasePolicy(ctx, kb); err != nil {
+			c.Error(err)
+			return
+		}
+	}
 
 	if err := h.kbRepository.UpdateKnowledgeBase(ctx, kb); err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{"kbId": utils.SanitizeForLog(kbIdStr)})
@@ -744,6 +759,7 @@ func (h *InitializationHandler) processInitializationModels(
 
 	for _, descriptor := range descriptors {
 		model := descriptor.toModel()
+		model.TenantID = types.MustTenantIDFromContext(ctx)
 		existingModelID := h.findExistingModelID(kb, descriptor.modelType)
 
 		var existingModel *types.Model
@@ -768,6 +784,9 @@ func (h *InitializationHandler) processInitializationModels(
 					"model_id": model.ID,
 					"kb_id":    kbIdStr,
 				})
+				if appErr, ok := errors.IsAppError(err); ok {
+					return nil, appErr
+				}
 				return nil, errors.NewInternalServerError("更新模型失败: " + err.Error())
 			}
 			processedModels = append(processedModels, existingModel)
@@ -779,6 +798,9 @@ func (h *InitializationHandler) processInitializationModels(
 				"model_id": model.ID,
 				"kb_id":    kbIdStr,
 			})
+			if appErr, ok := errors.IsAppError(err); ok {
+				return nil, appErr
+			}
 			return nil, errors.NewInternalServerError("创建模型失败: " + err.Error())
 		}
 		processedModels = append(processedModels, model)
@@ -797,6 +819,7 @@ func (descriptor modelDescriptor) toModel() *types.Model {
 			BaseURL:       descriptor.baseURL,
 			APIKey:        descriptor.apiKey,
 			InterfaceType: descriptor.interfaceType,
+			Provider:      string(provider.DetectProvider(descriptor.baseURL)),
 		},
 		IsDefault: false,
 		Status:    types.ModelStatusActive,

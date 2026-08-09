@@ -2422,6 +2422,11 @@ func (s *knowledgeService) ReparseKnowledge(
 	// to metadata so both this call's enqueue and the worker re-read the same
 	// config. nil keeps whatever was stored at upload time.
 	if processOverrides != nil {
+		if s.modelPolicy != nil {
+			if err := s.modelPolicy.ValidateProcessOverrides(ctx, kb, processOverrides, reparseFileTypes(existing)); err != nil {
+				return nil, err
+			}
+		}
 		if err := ValidateProcessOverrides(ctx, kb, processOverrides, reparseFileTypes(existing)); err != nil {
 			return nil, err
 		}
@@ -2437,6 +2442,11 @@ func (s *knowledgeService) ReparseKnowledge(
 
 	processOverrides, _ = existing.ProcessOverrides()
 	reparseEff := ResolveProcessConfig(kb, processOverrides)
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ApplyEffectiveProcessPolicy(ctx, &reparseEff); err != nil {
+			return nil, err
+		}
+	}
 
 	// Keep wiki's pending queue consistent across both manual and non-manual
 	// paths. The destructive work (swapping old wiki contributions for new)
@@ -3234,6 +3244,15 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 
 	processOverrides, _ := knowledge.ProcessOverrides()
 	eff := ResolveProcessConfig(kb, processOverrides)
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ApplyEffectiveProcessPolicy(ctx, &eff); err != nil {
+			knowledge.ParseStatus = types.ParseStatusFailed
+			knowledge.ErrorMessage = err.Error()
+			knowledge.UpdatedAt = time.Now()
+			_ = s.repo.UpdateKnowledge(ctx, knowledge)
+			return err
+		}
+	}
 
 	// Re-check abort status right before flipping to "processing" — closes
 	// the race where the user cancels between the entry guard above and

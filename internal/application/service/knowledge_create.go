@@ -148,6 +148,14 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ValidateProcessOverrides(ctx, kb, processOverrides, []string{getFileType(safeFilename)}); err != nil {
+			return nil, err
+		}
+		if err := s.modelPolicy.ApplyEffectiveProcessPolicy(ctx, &eff); err != nil {
+			return nil, err
+		}
+	}
 
 	// Prepare knowledge record
 	logger.Info(ctx, "Preparing knowledge record")
@@ -387,7 +395,7 @@ func (s *knowledgeService) CreateKnowledgeFromURL(ctx context.Context,
 
 	// Save knowledge record
 	logger.Infof(ctx, "Saving knowledge record to database, ID: %s", knowledge.ID)
-	eff, err := ApplyKnowledgeProcessOverrides(ctx, kb, knowledge, processOverrides, []string{"html"}, enableMultimodel)
+	eff, err := s.applyKnowledgeProcessOverrides(ctx, kb, knowledge, processOverrides, []string{"html"}, enableMultimodel)
 	if err != nil {
 		return nil, err
 	}
@@ -628,6 +636,14 @@ func (s *knowledgeService) createKnowledgeFromFileURL(
 	if err != nil {
 		return nil, err
 	}
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ValidateProcessOverrides(ctx, kb, processOverrides, []string{fileType}); err != nil {
+			return nil, err
+		}
+		if err := s.modelPolicy.ApplyEffectiveProcessPolicy(ctx, &eff); err != nil {
+			return nil, err
+		}
+	}
 	if processOverrides != nil {
 		if err := knowledge.SetProcessOverrides(processOverrides); err != nil {
 			logger.Errorf(ctx, "Failed to set process overrides: %v", err)
@@ -801,7 +817,7 @@ func (s *knowledgeService) CreateKnowledgeFromManual(ctx context.Context,
 	}
 
 	if status == types.ManualKnowledgeStatusPublish {
-		if _, err := ApplyKnowledgeProcessOverrides(ctx, kb, knowledge, payload.ProcessConfig, nil, nil); err != nil {
+		if _, err := s.applyKnowledgeProcessOverrides(ctx, kb, knowledge, payload.ProcessConfig, nil, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -1075,7 +1091,7 @@ func (s *knowledgeService) UpdateManualKnowledge(ctx context.Context,
 	existing.Description = ""
 	existing.ProcessedAt = nil
 
-	if _, err := ApplyKnowledgeProcessOverrides(ctx, kb, existing, payload.ProcessConfig, nil, nil); err != nil {
+	if _, err := s.applyKnowledgeProcessOverrides(ctx, kb, existing, payload.ProcessConfig, nil, nil); err != nil {
 		return nil, err
 	}
 
