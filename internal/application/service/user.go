@@ -22,6 +22,7 @@ import (
 
 	apprepo "github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/config"
+	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -155,6 +156,9 @@ func (s *userService) Register(ctx context.Context, req *types.RegisterRequest) 
 		createdTenant, err = s.tenantService.CreateTenant(ctx, tenant)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to create workspace")
+			if appErr, ok := apperrors.IsAppError(err); ok {
+				return nil, appErr
+			}
 			return nil, errors.New("failed to create workspace")
 		}
 	}

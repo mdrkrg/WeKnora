@@ -21,8 +21,30 @@ type ListTenantsParams struct {
 
 // tenantService implements the TenantService interface
 type tenantService struct {
-	repo        interfaces.TenantRepository // Repository for tenant data operations
-	storageRepo interfaces.StorageBackendRepository
+	repo                  interfaces.TenantRepository // Repository for tenant data operations
+	storageRepo           interfaces.StorageBackendRepository
+	modelRepo             interfaces.ModelRepository
+	modelPolicy           interfaces.ModelPolicyService
+	workspaceProvisioning *types.WorkspaceProvisioningConfig
+}
+
+// NewTenantServiceWithWorkspaceProvisioning is the deployment-wired variant.
+// Keeping NewTenantService preserves the disabled-feature compatibility used
+// by existing embedders and unit tests.
+func NewTenantServiceWithWorkspaceProvisioning(
+	repo interfaces.TenantRepository,
+	storageRepo interfaces.StorageBackendRepository,
+	modelRepo interfaces.ModelRepository,
+	modelPolicy interfaces.ModelPolicyService,
+	workspaceProvisioning *types.WorkspaceProvisioningConfig,
+) interfaces.TenantService {
+	return &tenantService{
+		repo:                  repo,
+		storageRepo:           storageRepo,
+		modelRepo:             modelRepo,
+		modelPolicy:           modelPolicy,
+		workspaceProvisioning: workspaceProvisioning,
+	}
 }
 
 // NewTenantService creates a new tenant service instance
@@ -40,6 +62,16 @@ func (s *tenantService) CreateTenant(ctx context.Context, tenant *types.Tenant) 
 	}
 
 	logger.Infof(ctx, "Creating tenant, name: %s", tenant.Name)
+
+	if s.workspaceProvisioning != nil {
+		if err := validateWorkspaceDefaultModels(
+			ctx, s.modelRepo, s.modelPolicy, s.workspaceProvisioning,
+		); err != nil {
+			logger.Errorf(ctx, "Workspace provisioning default model validation failed: %v", err)
+			return nil, err
+		}
+		s.workspaceProvisioning.ApplyTenantDefaults(tenant)
+	}
 
 	// New tenants do not receive an API key by default. Integrations create
 	// keys explicitly through tenant_api_keys.

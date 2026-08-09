@@ -299,15 +299,29 @@ func (s *sessionService) selectChatModelID(
 		logger.Errorf(ctx, "Failed to list models: %v", err)
 		return "", fmt.Errorf("failed to list models: %w", err)
 	}
-	for _, model := range models {
-		if model != nil && model.Type == types.ModelTypeKnowledgeQA {
-			logger.Infof(ctx, "Using first available KnowledgeQA model: %s", model.ID)
-			return model.ID, nil
-		}
+	if modelID := preferredModelID(models, types.ModelTypeKnowledgeQA); modelID != "" {
+		logger.Infof(ctx, "Using tenant default KnowledgeQA model: %s", modelID)
+		return modelID, nil
 	}
 
 	logger.Error(ctx, "No chat model ID available")
 	return "", fmt.Errorf("no chat model ID available: no knowledge bases configured and no available models")
+}
+
+// preferredModelID prefers an active default model of the requested type and
+// falls back to the first active model of that type.
+func preferredModelID(models []*types.Model, modelType types.ModelType) string {
+	for _, model := range models {
+		if model != nil && model.Type == modelType && model.Status == types.ModelStatusActive && model.IsDefault {
+			return model.ID
+		}
+	}
+	for _, model := range models {
+		if model != nil && model.Type == modelType && model.Status == types.ModelStatusActive {
+			return model.ID
+		}
+	}
+	return ""
 }
 
 // resolveKnowledgeBasesFromAgent resolves knowledge base IDs based on agent's KBSelectionMode.

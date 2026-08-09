@@ -35,16 +35,49 @@ const (
 
 // customAgentService implements the CustomAgentService interface
 type customAgentService struct {
-	repo           interfaces.CustomAgentRepository
-	chunkRepo      interfaces.ChunkRepository
-	kbService      interfaces.KnowledgeBaseService
-	kbShareService interfaces.KBShareService
-	wikiPageRepo   interfaces.WikiPageRepository
-	tagRepo        interfaces.KnowledgeTagRepository
-	knowledgeRepo  interfaces.KnowledgeRepository
+	repo                  interfaces.CustomAgentRepository
+	chunkRepo             interfaces.ChunkRepository
+	kbService             interfaces.KnowledgeBaseService
+	kbShareService        interfaces.KBShareService
+	wikiPageRepo          interfaces.WikiPageRepository
+	tagRepo               interfaces.KnowledgeTagRepository
+	knowledgeRepo         interfaces.KnowledgeRepository
+	tenantRepo            interfaces.TenantRepository
+	modelRepo             interfaces.ModelRepository
+	modelPolicy           interfaces.ModelPolicyService
+	workspaceProvisioning *types.WorkspaceProvisioningConfig
 }
 
-// NewCustomAgentService creates a new custom agent service
+// NewCustomAgentServiceWithWorkspaceProvisioning wires creation-time model
+// defaults while retaining the legacy constructor for disabled deployments.
+func NewCustomAgentServiceWithWorkspaceProvisioning(
+	repo interfaces.CustomAgentRepository,
+	chunkRepo interfaces.ChunkRepository,
+	kbService interfaces.KnowledgeBaseService,
+	kbShareService interfaces.KBShareService,
+	wikiPageRepo interfaces.WikiPageRepository,
+	tagRepo interfaces.KnowledgeTagRepository,
+	knowledgeRepo interfaces.KnowledgeRepository,
+	tenantRepo interfaces.TenantRepository,
+	modelRepo interfaces.ModelRepository,
+	modelPolicy interfaces.ModelPolicyService,
+	workspaceProvisioning *types.WorkspaceProvisioningConfig,
+) interfaces.CustomAgentService {
+	return &customAgentService{
+		repo:                  repo,
+		chunkRepo:             chunkRepo,
+		kbService:             kbService,
+		kbShareService:        kbShareService,
+		wikiPageRepo:          wikiPageRepo,
+		tagRepo:               tagRepo,
+		knowledgeRepo:         knowledgeRepo,
+		tenantRepo:            tenantRepo,
+		modelRepo:             modelRepo,
+		modelPolicy:           modelPolicy,
+		workspaceProvisioning: workspaceProvisioning,
+	}
+}
+
 func NewCustomAgentService(
 	repo interfaces.CustomAgentRepository,
 	chunkRepo interfaces.ChunkRepository,
@@ -83,6 +116,30 @@ func (s *customAgentService) CreateAgent(ctx context.Context, agent *types.Custo
 		return nil, ErrInvalidTenantID
 	}
 	agent.TenantID = tenantID
+
+	if s.workspaceProvisioning != nil && s.workspaceProvisioning.Enabled {
+		chatWasEmpty := strings.TrimSpace(agent.Config.ModelID) == ""
+		rerankWasEmpty := strings.TrimSpace(agent.Config.RerankModelID) == ""
+		var tenant *types.Tenant
+		if s.tenantRepo != nil {
+			var err error
+			tenant, err = s.tenantRepo.GetTenantByID(ctx, tenantID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		s.workspaceProvisioning.ApplyAgentDefaults(agent, tenant)
+		if chatWasEmpty {
+			if err := s.validateAgentDefaultModel(ctx, tenantID, "chat", agent.Config.ModelID, types.ModelTypeKnowledgeQA); err != nil {
+				return nil, err
+			}
+		}
+		if rerankWasEmpty && strings.TrimSpace(agent.Config.RerankModelID) != "" {
+			if err := s.validateAgentDefaultModel(ctx, tenantID, "rerank", agent.Config.RerankModelID, types.ModelTypeRerank); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	// Record the creator. Mirrors KnowledgeBase.CreatorID — needed by
 	// RBAC's RequireOwnershipOrRole so Contributors can edit their own
@@ -124,6 +181,18 @@ func (s *customAgentService) CreateAgent(ctx context.Context, agent *types.Custo
 
 	logger.Infof(ctx, "Custom agent created successfully, ID: %s, name: %s", agent.ID, agent.Name)
 	return agent, nil
+}
+
+func (s *customAgentService) validateAgentDefaultModel(
+	ctx context.Context,
+	tenantID uint64,
+	purpose string,
+	id string,
+	expected types.ModelType,
+) error {
+	return validateWorkspaceDefaultModel(
+		ctx, s.modelRepo, s.modelPolicy, tenantID, purpose, id, expected, false, false,
+	)
 }
 
 // GetAgentByID retrieves an agent by its ID (including built-in agents)
