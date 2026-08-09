@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useI18n } from 'vue-i18n'
 import {
@@ -13,12 +13,24 @@ import {
   deleteDataSource,
   putDataSourceCredentials,
   deleteDataSourceCredentials,
+  getDataSourceOAuthAuthorizeURL,
+  getDataSourceOAuthStatus,
+  revokeDataSourceOAuth,
+  DS_OAUTH_CALLBACK_PATH,
   type DataSource,
   type Resource,
 } from '@/api/datasource'
+import { getCanvasOAuthStatus } from '@/api/canvas-oauth'
+import { useUIStore } from '@/stores/ui'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import { getDatasourceIconUrl } from './datasourceIcons'
+import { deleteTemporaryDataSourceDraft } from './dataSourceDraftLifecycle'
+import {
+  dataSourceErrorMessage,
+  isCanvasAuthorizationError,
+} from './dataSourceResourceErrors'
+import type { DataSourceSyncStartedEvent } from './dataSourceSyncMonitor'
 
 const props = defineProps<{
   kbId: string
@@ -26,8 +38,12 @@ const props = defineProps<{
 }>()
 
 const visible = defineModel<boolean>('visible', { default: false })
-const emit = defineEmits<{ saved: [] }>()
+const emit = defineEmits<{
+  saved: [event: DataSourceSyncStartedEvent | null]
+  discarded: []
+}>()
 const { t } = useI18n()
+const uiStore = useUIStore()
 
 const isEdit = computed(() => !!props.dataSource)
 const step = ref(0)
@@ -184,6 +200,8 @@ const form = ref({
 // Step 2: Resources
 const resources = ref<Resource[]>([])
 const loadingResources = ref(false)
+const resourceLoadError = ref('')
+const resourceAuthorizationExpired = ref(false)
 const selectedResourceIds = ref<string[]>([])
 const expandedResourceIds = ref(new Set<string>())
 // Lazy loading: parents whose children have already been fetched, and parents
@@ -451,6 +469,36 @@ const prereqExpanded = ref(false)
 
 // Temp data source for resource listing
 const tempDsId = ref('')
+const draftCommitted = ref(false)
+let draftCleanupInFlight: Promise<void> | null = null
+
+async function cleanupTemporaryDataSource() {
+  if (draftCleanupInFlight) {
+    await draftCleanupInFlight
+    return
+  }
+  draftCleanupInFlight = (async () => {
+    const deletedId = await deleteTemporaryDataSourceDraft(
+      {
+        isEdit: isEdit.value,
+        tempDsId: tempDsId.value,
+        isCommitted: draftCommitted.value,
+      },
+      deleteDataSource,
+    )
+    if (deletedId && tempDsId.value === deletedId) {
+      tempDsId.value = ''
+      emit('discarded')
+    }
+  })()
+  try {
+    await draftCleanupInFlight
+  } catch (error) {
+    console.warn('[DataSource] failed to clean up temporary draft', error)
+  } finally {
+    draftCleanupInFlight = null
+  }
+}
 
 // Schedule presets
 const schedulePresets = computed(() => [
@@ -596,6 +644,17 @@ const connectorDefs = computed<ConnectorDef[]>(() => [
       { key: 'auth_headers', labelKey: 'datasource.field.authHeaders', placeholder: '', optional: true, hintKey: 'datasource.field.authHeadersHint', fieldType: 'custom_headers' },
     ],
   },
+  {
+    type: 'canvas',
+    available: true,
+    docUrl: 'https://canvas.instructure.com/doc/api/file.oauth.html',
+    permissionDocUrl: 'https://canvas.instructure.com/doc/api/file.oauth.html',
+    permissionPageUrl: '',
+    requiredPermissions: [],
+    // App credentials (base_url / client_id / client_secret) are fixed by
+    // workspace admins in Settings → Canvas LMS. Users only authorize OAuth.
+    fields: [],
+  },
 ])
 
 
@@ -604,23 +663,20 @@ const currentDef = computed(() => connectorDefs.value.find(d => d.type === form.
 // --- Drawer lifecycle ---
 watch(visible, async (v) => {
   if (!v) {
-    if (!isEdit.value && tempDsId.value) {
-      try {
-        await deleteDataSource(tempDsId.value)
-      } catch {
-        // Ignore cleanup errors
-      }
-      tempDsId.value = ''
-    }
+    stopCanvasOAuthPolling(true)
+    await cleanupTemporaryDataSource()
     return
   }
   step.value = isEdit.value ? 1 : 0
   testResult.value = ''
   testErrorMsg.value = ''
   tempDsId.value = ''
+  draftCommitted.value = false
   prereqExpanded.value = false
   pendingRemoveCredentials.value = false
   resources.value = []
+  resourceLoadError.value = ''
+  resourceAuthorizationExpired.value = false
   selectedResourceIds.value = []
   expandedResourceIds.value = new Set()
   loadedChildrenIds.value = new Set()
@@ -669,6 +725,10 @@ watch(visible, async (v) => {
       }
     }
     tempDsId.value = props.dataSource.id
+    if (form.value.type === 'canvas') {
+      void refreshCanvasAppStatus()
+      void refreshOAuthStatus(props.dataSource.id)
+    }
   } else {
     replaceCredentialsMode.value = false
     credentialsConfigured.value = false
@@ -717,13 +777,31 @@ watch(
   },
 )
 
-function selectType(def: ConnectorDef) {
+const canvasAppConfigured = ref(true)
+const canvasAppChecking = ref(false)
+
+async function refreshCanvasAppStatus() {
+  canvasAppChecking.value = true
+  try {
+    const status = await getCanvasOAuthStatus()
+    canvasAppConfigured.value = !!status.configured
+  } catch {
+    canvasAppConfigured.value = false
+  } finally {
+    canvasAppChecking.value = false
+  }
+}
+
+async function selectType(def: ConnectorDef) {
   if (!def.available) return
   form.value.type = def.type
   form.value.name = t(`datasource.connector.${def.type}`)
   form.value.config.credentials = {}
   rssAuthHeaders.value = []
   step.value = 1
+  if (def.type === 'canvas') {
+    await refreshCanvasAppStatus()
+  }
 }
 
 // --- Test connection (stateless, no DB write) ---
@@ -772,6 +850,9 @@ async function testConnection() {
 // --- Load resources ---
 async function loadResources() {
   loadingResources.value = true
+  resourceLoadError.value = ''
+  resourceAuthorizationExpired.value = false
+  resources.value = []
   try {
     if (!tempDsId.value) {
       const res = await createDataSource({
@@ -816,9 +897,21 @@ async function loadResources() {
       if (hidden.length > 0) void revealExistingSelections(hidden)
     }
   } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.resourceLoadFailed'))
+    const message = dataSourceErrorMessage(e) || t('datasource.resourceLoadFailed')
+    resourceLoadError.value = message
+    resourceAuthorizationExpired.value = isCanvasAuthorizationError(form.value.type, e)
+    if (resourceAuthorizationExpired.value) {
+      oauthAuthorized.value = false
+      testResult.value = 'error'
+      testErrorMsg.value = t('datasource.oauthExpired')
+    }
+    MessagePlugin.error(message)
   }
   loadingResources.value = false
+}
+
+function returnToCanvasAuthorization() {
+  step.value = 1
 }
 
 // revealExistingSelections asks the backend which ancestors must be expanded to
@@ -941,7 +1034,14 @@ function validateStep1Fields(): boolean {
 async function nextStep() {
   if (step.value === 1) {
     if (!validateStep1Fields()) return
-    if (needsConnectionTest() && testResult.value !== 'success') {
+    if (form.value.type === 'canvas') {
+      if (!canvasAppConfigured.value) {
+        MessagePlugin.warning(t('datasource.canvasAppRequired'))
+        return
+      }
+      const ok = await ensureCanvasAuthorized()
+      if (!ok) return
+    } else if (needsConnectionTest() && testResult.value !== 'success') {
       await testConnection()
       if ((testResult.value as string) !== 'success') return
     }
@@ -968,6 +1068,137 @@ async function nextStep() {
       return
     }
     loadResources()
+  }
+}
+
+const oauthAuthorized = ref(false)
+const oauthAuthorizing = ref(false)
+const oauthChecking = ref(false)
+const oauthPollTimer = ref<number | null>(null)
+const oauthPopup = ref<Window | null>(null)
+
+function stopCanvasOAuthPolling(closePopup = false) {
+  if (oauthPollTimer.value !== null) {
+    window.clearInterval(oauthPollTimer.value)
+    oauthPollTimer.value = null
+  }
+  if (closePopup && oauthPopup.value && !oauthPopup.value.closed) {
+    oauthPopup.value.close()
+  }
+  oauthPopup.value = null
+  oauthAuthorizing.value = false
+}
+
+async function refreshOAuthStatus(dsId?: string) {
+  const id = dsId || tempDsId.value
+  if (!id || form.value.type !== 'canvas') {
+    oauthAuthorized.value = false
+    return
+  }
+  oauthChecking.value = true
+  try {
+    oauthAuthorized.value = await getDataSourceOAuthStatus(id)
+  } catch {
+    oauthAuthorized.value = false
+  } finally {
+    oauthChecking.value = false
+  }
+}
+
+async function ensureCanvasDataSource(): Promise<string | null> {
+  if (tempDsId.value) {
+    if (!isEdit.value) {
+      await updateDataSource(tempDsId.value, {
+        ...form.value,
+        knowledge_base_id: props.kbId,
+      } as any)
+    } else if (replaceCredentialsMode.value) {
+      const ok = await commitCredentialsIfNeeded(tempDsId.value)
+      if (!ok) return null
+    }
+    return tempDsId.value
+  }
+  const res = await createDataSource({
+    ...form.value,
+    knowledge_base_id: props.kbId,
+    status: 'paused',
+  } as any)
+  const created = res?.data || res
+  tempDsId.value = created.id
+  return tempDsId.value
+}
+
+async function authorizeCanvasOAuth() {
+  if (!canvasAppConfigured.value) {
+    MessagePlugin.warning(t('datasource.canvasAppRequired'))
+    return
+  }
+  if (!validateStep1Fields()) return
+  oauthAuthorizing.value = true
+  try {
+    stopCanvasOAuthPolling(true)
+    oauthAuthorizing.value = true
+    const dsId = await ensureCanvasDataSource()
+    if (!dsId) {
+      oauthAuthorizing.value = false
+      return
+    }
+    const redirectUri = window.location.origin + DS_OAUTH_CALLBACK_PATH
+    const authUrl = await getDataSourceOAuthAuthorizeURL(dsId, {
+      redirect_uri: redirectUri,
+      frontend_redirect: window.location.href.split('#')[0],
+    })
+    if (!authUrl) {
+      MessagePlugin.error(t('datasource.oauthAuthorizeFailed'))
+      oauthAuthorizing.value = false
+      return
+    }
+    const popup = window.open(authUrl, 'ds_oauth', 'width=720,height=800')
+    oauthPopup.value = popup
+    oauthPollTimer.value = window.setInterval(async () => {
+      const closed = !popup || popup.closed
+      try {
+        oauthAuthorized.value = await getDataSourceOAuthStatus(dsId)
+      } catch {
+        /* ignore poll errors */
+      }
+      if (oauthAuthorized.value || closed) {
+        stopCanvasOAuthPolling(oauthAuthorized.value)
+        if (oauthAuthorized.value) {
+          testResult.value = 'success'
+          MessagePlugin.success(t('datasource.oauthAuthorizedToast'))
+        }
+      }
+    }, 1500)
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('datasource.oauthAuthorizeFailed'))
+    oauthAuthorizing.value = false
+  }
+}
+
+async function revokeCanvasOAuth() {
+  if (!tempDsId.value) return
+  try {
+    await revokeDataSourceOAuth(tempDsId.value)
+    oauthAuthorized.value = false
+    testResult.value = ''
+    MessagePlugin.success(t('datasource.oauthRevokedToast'))
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('datasource.oauthRevokeFailed'))
+  }
+}
+
+async function ensureCanvasAuthorized(): Promise<boolean> {
+  try {
+    const dsId = await ensureCanvasDataSource()
+    if (!dsId) return false
+    await refreshOAuthStatus(dsId)
+    if (oauthAuthorized.value) return true
+    MessagePlugin.warning(t('datasource.oauthRequired'))
+    return false
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('datasource.saveFailed'))
+    return false
   }
 }
 
@@ -1021,6 +1252,7 @@ async function handleSubmit() {
   submitting.value = true
   try {
     let dataSourceId = tempDsId.value
+    let syncStartedEvent: DataSourceSyncStartedEvent | null = null
 
     if (tempDsId.value) {
       // Commit credential replacement BEFORE the main PUT so a validation
@@ -1053,18 +1285,26 @@ async function handleSubmit() {
       MessagePlugin.warning(t('datasource.updateSuccessSyncHint'))
     } else {
       try {
-        await triggerSync(dataSourceId)
+        const response: any = await triggerSync(dataSourceId)
+        const syncLog = response?.data || response
+        if (syncLog?.id) {
+          syncStartedEvent = {
+            kbId: props.kbId,
+            dataSourceId,
+            syncLogId: syncLog.id,
+          }
+        }
         MessagePlugin.success(t('datasource.createAndSyncSuccess'))
       } catch (e: any) {
         MessagePlugin.warning(e?.message || e?.error || t('datasource.createButSyncFailed'))
       }
     }
 
-    emit('saved')
-    // Clear before close — otherwise the visible watcher treats the just-saved
-    // row as an abandoned temp draft and DELETEs it (loadResources creates the
-    // row early at step 2 with tempDsId).
+    // Commit before notifying the parent: the saved event closes the drawer
+    // synchronously, and its close watcher must never see this row as a draft.
+    draftCommitted.value = true
     tempDsId.value = ''
+    emit('saved', syncStartedEvent)
     visible.value = false
   } catch (e: any) {
     MessagePlugin.error(e?.message || e?.error || t('datasource.saveFailed'))
@@ -1072,9 +1312,16 @@ async function handleSubmit() {
   submitting.value = false
 }
 
-function handleClose() {
+async function handleClose() {
+  stopCanvasOAuthPolling(true)
+  await cleanupTemporaryDataSource()
   visible.value = false
 }
+
+onBeforeUnmount(() => {
+  stopCanvasOAuthPolling(true)
+  void cleanupTemporaryDataSource()
+})
 
 async function handleDrawerConfirm() {
   if (step.value === 1 || step.value === 2) {
@@ -1125,6 +1372,9 @@ const resourceTypeLabelMap: Record<string, string> = {
   wiki_space: 'datasource.resourceType.wikiSpace',
   doc_category: 'datasource.resourceType.docCategory',
   book: 'datasource.resourceType.book',
+  course: 'datasource.resourceType.course',
+  folder: 'datasource.resourceType.folder',
+  file: 'datasource.resourceType.file',
 }
 
 function resourceTypeLabel(type: string): string {
@@ -1365,7 +1615,44 @@ const drawerConfirmText = computed(() => {
       <section class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ t('datasource.credentialsLabel') }}</h4>
 
-        <div v-if="isEdit && credentialsConfigured && !replaceCredentialsMode" class="form-item">
+        <div v-if="form.type === 'canvas'" class="form-item oauth-block">
+          <div v-if="!canvasAppConfigured" class="oauth-admin-required">
+            <t-tag theme="warning" variant="light">{{ t('datasource.canvasAppUnconfigured') }}</t-tag>
+            <p class="form-desc">{{ t('datasource.canvasAppRequiredHint') }}</p>
+          </div>
+          <template v-else>
+            <label class="form-label">{{ t('datasource.oauthAuthorization') }}</label>
+            <div class="oauth-status">
+              <t-tag v-if="oauthAuthorized" theme="success" variant="light">
+                {{ t('datasource.oauthAuthorized') }}
+              </t-tag>
+              <t-tag v-else theme="warning" variant="light">
+                {{ t('datasource.oauthUnauthorized') }}
+              </t-tag>
+              <t-button
+                size="small"
+                theme="primary"
+                variant="outline"
+                :loading="oauthAuthorizing || oauthChecking"
+                @click="authorizeCanvasOAuth"
+              >
+                {{ oauthAuthorized ? t('datasource.oauthReauthorize') : t('datasource.oauthAuthorize') }}
+              </t-button>
+              <t-button
+                v-if="oauthAuthorized && tempDsId"
+                size="small"
+                theme="danger"
+                variant="text"
+                @click="revokeCanvasOAuth"
+              >
+                {{ t('datasource.oauthRevoke') }}
+              </t-button>
+            </div>
+            <p class="form-desc">{{ t('datasource.oauthAuthorizeHint') }}</p>
+          </template>
+        </div>
+
+        <div v-if="form.type !== 'canvas' && isEdit && credentialsConfigured && !replaceCredentialsMode" class="form-item">
           <div
             class="credential-faux-input"
             :class="{ 'is-confirm-remove': pendingRemoveCredentials }"
@@ -1407,7 +1694,7 @@ const drawerConfirmText = computed(() => {
         </div>
 
         <div
-          v-else-if="isEdit && !credentialsConfigured && !replaceCredentialsMode"
+          v-else-if="form.type !== 'canvas' && isEdit && !credentialsConfigured && !replaceCredentialsMode"
           class="form-item"
         >
           <div
@@ -1424,7 +1711,7 @@ const drawerConfirmText = computed(() => {
           </div>
         </div>
 
-        <template v-else-if="credentialsInputVisible">
+        <template v-else-if="form.type !== 'canvas' && credentialsInputVisible">
           <div
             v-for="field in currentDef?.fields || []"
             :key="field.key"
@@ -1506,7 +1793,6 @@ const drawerConfirmText = computed(() => {
     <section v-if="step === 2" class="setting-drawer__section ds-resource-section">
       <h4 class="setting-drawer__section-title">{{ t('datasource.step.resources') }}</h4>
       <p class="ds-resource-hint">{{ t('datasource.resourceHint') }}</p>
-
       <!-- Drive (云盘) root input: shown alongside the tree (not as a switch).
            The user supplies a folder_token (or a Drive folder URL) and clicks
            "load"; the tree below stays as a placeholder until load succeeds.
@@ -1546,6 +1832,28 @@ const drawerConfirmText = computed(() => {
       </div>
 
       <div v-else-if="loadingResources" class="ds-loading-center"><t-loading /></div>
+      <div v-else-if="resourceLoadError" class="ds-resource-empty">
+        <t-icon name="error-circle" size="32px" style="color: var(--td-error-color); margin-bottom: 8px;" />
+        <p class="ds-empty-title">
+          {{ resourceAuthorizationExpired ? t('datasource.oauthExpired') : t('datasource.resourceLoadFailed') }}
+        </p>
+        <p class="ds-empty-desc">
+          {{ resourceAuthorizationExpired ? t('datasource.oauthExpiredDesc') : resourceLoadError }}
+        </p>
+        <div class="ds-empty-actions">
+          <button
+            v-if="resourceAuthorizationExpired"
+            type="button"
+            class="ds-empty-retry"
+            @click="returnToCanvasAuthorization"
+          >
+            {{ t('datasource.returnToReauthorize') }}
+          </button>
+          <button v-else type="button" class="ds-empty-retry" @click="loadResources">
+            {{ t('datasource.retryLoadResources') }}
+          </button>
+        </div>
+      </div>
       <div v-else-if="resources.length > 0" class="resource-picker">
         <div class="resource-picker__toolbar">
           <span class="resource-picker__count">
@@ -2351,6 +2659,18 @@ const drawerConfirmText = computed(() => {
   background: color-mix(in srgb, var(--td-text-color-placeholder) 12%, transparent);
   color: var(--td-text-color-secondary);
   outline: none;
+}
+
+.oauth-status,
+.oauth-admin-required {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.oauth-block .form-desc {
+  margin-top: 8px;
 }
 
 .resource-picker__check {

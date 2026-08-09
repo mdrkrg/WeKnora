@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
+	dsoauth "github.com/Tencent/WeKnora/internal/datasource/oauth"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -33,6 +34,7 @@ type DataSourceService struct {
 	scheduler         *datasource.Scheduler
 	tenantRepo        interfaces.TenantRepository
 	tagService        interfaces.KnowledgeTagService
+	coordinator       dsoauth.Coordinator
 	audit             interfaces.AuditLogService
 }
 
@@ -61,6 +63,13 @@ func NewDataSourceService(
 		tagService:        tagService,
 		audit:             audit,
 	}
+}
+
+// SetCanvasCoordinator injects the cross-replica coordination used for OAuth
+// refresh locking and distributed rate limiting. It is optional: when nil,
+// connectors fall back to process-local singleflight and rate limiting.
+func (s *DataSourceService) SetCanvasCoordinator(c dsoauth.Coordinator) {
+	s.coordinator = c
 }
 
 // CreateDataSource creates a new data source configuration
@@ -319,6 +328,49 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 	return nil
 }
 
+// MergeDataSourceCredentials patches credential keys onto the existing map.
+// Empty-string values delete the key. Does not run live connector validation
+// (used by OAuth token write-back / refresh).
+func (s *DataSourceService) MergeDataSourceCredentials(
+	ctx context.Context, id string, patch map[string]interface{},
+) error {
+	if id == "" {
+		return datasource.ErrDataSourceInvalid
+	}
+	existing, err := s.dsRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	parsed, err := existing.ParseConfig()
+	if err != nil {
+		return err
+	}
+	if parsed == nil {
+		parsed = &types.DataSourceConfig{Type: existing.Type}
+	}
+	if parsed.Credentials == nil {
+		parsed.Credentials = map[string]interface{}{}
+	}
+	for k, v := range patch {
+		if s, ok := v.(string); ok && s == "" {
+			delete(parsed.Credentials, k)
+			continue
+		}
+		parsed.Credentials[k] = v
+	}
+	parsed.StripNonSecretCredentials(existing.Type)
+	blob, err := parsed.ToJSON()
+	if err != nil {
+		return err
+	}
+	existing.Config = blob
+	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		return err
+	}
+	logger.Infof(ctx, "DataSource credentials merged: id=%s", secutils.SanitizeForLog(id))
+	return nil
+}
+
 // DeleteDataSource deletes a data source (soft delete)
 func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) error {
 	// Verify data source exists
@@ -347,6 +399,96 @@ func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) err
 	return nil
 }
 
+// attachCredentialPersister wires OAuth token write-back for connectors that
+// refresh tokens during API calls.
+func (s *DataSourceService) attachCredentialPersister(dsID string, config *types.DataSourceConfig) {
+	if config == nil || dsID == "" {
+		return
+	}
+	config.OnCredentialsUpdated = func(ctx context.Context, credentials map[string]interface{}) error {
+		return s.MergeDataSourceCredentials(ctx, dsID, credentials)
+	}
+	config.OnCredentialsReload = func(ctx context.Context) (map[string]interface{}, error) {
+		existing, err := s.dsRepo.FindByID(ctx, dsID)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := existing.ParseConfig()
+		if err != nil {
+			return nil, err
+		}
+		if parsed == nil || parsed.Credentials == nil {
+			return map[string]interface{}{}, nil
+		}
+		credentials := make(map[string]interface{}, len(parsed.Credentials))
+		for key, value := range parsed.Credentials {
+			credentials[key] = value
+		}
+		return credentials, nil
+	}
+	if s.coordinator != nil {
+		config.AcquireCredentialRefreshLock = func(ctx context.Context) (func(), error) {
+			return s.coordinator.AcquireLock(ctx, dsoauth.CanvasRefreshLockKey(dsID), dsoauth.CanvasRefreshLockTTL)
+		}
+		config.WaitForRateLimit = func(ctx context.Context) error {
+			return s.coordinator.WaitRateLimit(ctx, dsoauth.CanvasRateLimitKey(dsID))
+		}
+	}
+}
+
+// enrichCanvasConfig injects deployment-level Canvas OAuth app credentials
+// into the in-memory datasource config so connectors never require users to
+// paste client_id / client_secret. Unavailable or misconfigured app
+// credentials are logged and skipped — startup validation (BuildContainer)
+// already fails fast on misconfiguration, so this only guards runtime
+// env drift.
+func (s *DataSourceService) enrichCanvasConfig(ctx context.Context, ds *types.DataSource, config *types.DataSourceConfig) {
+	if ds == nil || config == nil || ds.Type != types.ConnectorTypeCanvas {
+		return
+	}
+	config.RuntimeDataSourceID = ds.ID
+	app, err := dsoauth.LoadAppCredentials()
+	if err != nil {
+		logger.Warnf(ctx, "failed to load Canvas OAuth app credentials: %v", err)
+		return
+	}
+	if app == nil {
+		return
+	}
+	if config.Credentials == nil {
+		config.Credentials = map[string]interface{}{}
+	}
+	setIfEmpty := func(key, val string) {
+		raw, ok := config.Credentials[key]
+		if ok {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				return
+			}
+		}
+		config.Credentials[key] = val
+	}
+	setIfEmpty("base_url", app.BaseURL)
+	setIfEmpty("client_id", app.ClientID)
+	setIfEmpty("client_secret", app.ClientSecret)
+}
+
+// loadConnectorConfig parses a data source's persisted configuration and
+// attaches the runtime pieces connectors may need: deployment-level Canvas
+// OAuth app credentials plus the credential write-back hooks used when a
+// connector refreshes OAuth tokens mid-call.
+func (s *DataSourceService) loadConnectorConfig(ctx context.Context, ds *types.DataSource) (*types.DataSourceConfig, error) {
+	config, err := ds.ParseConfig()
+	if err != nil {
+		return nil, datasource.ErrInvalidConfig
+	}
+	if config == nil {
+		config = &types.DataSourceConfig{Type: ds.Type}
+	}
+	s.enrichCanvasConfig(ctx, ds, config)
+	s.attachCredentialPersister(ds.ID, config)
+	return config, nil
+}
+
 // ValidateConnection tests the connection to an external data source
 func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string) error {
 	ds, err := s.GetDataSource(ctx, dsID)
@@ -361,7 +503,7 @@ func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string)
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
@@ -403,7 +545,7 @@ func (s *DataSourceService) ListAvailableResources(
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
@@ -437,7 +579,7 @@ func (s *DataSourceService) ResolveResourceAncestors(
 		return nil, err
 	}
 
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
@@ -646,7 +788,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		logger.Errorf(ctx, "failed to parse config: %v", err)
 		syncLog.Status = types.SyncLogStatusFailed
@@ -706,6 +848,21 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 			}
 		}
 		logger.Errorf(ctx, "fetch operation failed: %v", fetchErr)
+		syncLog.Status = types.SyncLogStatusFailed
+		syncLog.FinishedAt = timePtr(time.Now().UTC())
+		syncLog.ErrorMessage = fmt.Sprintf("Fetch failed: %v", fetchErr)
+		_ = s.syncLogRepo.Update(ctx, syncLog)
+		if !wasPaused {
+			ds.Status = types.DataSourceStatusError
+		}
+		ds.ErrorMessage = syncLog.ErrorMessage
+		_ = s.dsRepo.Update(ctx, ds)
+		return fetchErr
+	}
+
+	items, fetchErr = s.rehydrateMissingCanvasItems(ctx, ds, connector, config, items)
+	if fetchErr != nil {
+		logger.Errorf(ctx, "failed to restore missing Canvas items: %v", fetchErr)
 		syncLog.Status = types.SyncLogStatusFailed
 		syncLog.FinishedAt = timePtr(time.Now().UTC())
 		syncLog.ErrorMessage = fmt.Sprintf("Fetch failed: %v", fetchErr)
@@ -840,7 +997,48 @@ func (s *DataSourceService) applyFetchedItem(
 	ctx context.Context, ds *types.DataSource, item *types.FetchedItem,
 	tagIDs []string, result *types.SyncResult,
 ) {
+	if item.IsSkipped {
+		// The connector inspected the item and found no source-side changes.
+		// Skipped items carry identity/metadata only and must not be ingested.
+		result.Skipped++
+		return
+	}
+
 	if item.IsDeleted {
+		if ds.Type == types.ConnectorTypeCanvas && ds.SyncDeletions {
+			// Canvas: perform real KB deletion, scoped to items owned by this
+			// data source. Other connectors keep the count-only policy below.
+			repo := s.knowledgeService.GetRepository()
+			existing, lookupErr := repo.FindByDataSourceExternalID(
+				ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID,
+			)
+			if lookupErr != nil {
+				result.Failed++
+				recordSyncError(result, types.SyncItemError{
+					Title:   item.Title,
+					Code:    "canvas_deletion_lookup_failed",
+					Message: fmt.Sprintf("%s: find deleted knowledge: %v", item.ExternalID, lookupErr),
+				})
+				return
+			}
+			if existing == nil {
+				// Deletion is idempotent: the source item may already have been
+				// removed manually or by an earlier sync.
+				result.Skipped++
+				return
+			}
+			if deleteErr := s.knowledgeService.DeleteKnowledge(ctx, existing.ID); deleteErr != nil {
+				result.Failed++
+				recordSyncError(result, types.SyncItemError{
+					Title:   item.Title,
+					Code:    "canvas_deletion_failed",
+					Message: fmt.Sprintf("%s: delete knowledge: %v", item.ExternalID, deleteErr),
+				})
+				return
+			}
+			result.Deleted++
+			return
+		}
 		if ds.SyncDeletions {
 			// Count only — actual KB deletion is intentionally not performed.
 			// Users manage knowledge removal explicitly via the KB UI to avoid
@@ -1040,6 +1238,77 @@ func (s *DataSourceService) processSyncStreaming(
 	return nil
 }
 
+// rehydrateMissingCanvasItems repairs the case where a user deletes synced
+// knowledge while the Canvas cursor still classifies the source file as
+// unchanged. Only missing skipped files are downloaded again; unchanged files
+// that are still present in the knowledge base keep the incremental fast path.
+func (s *DataSourceService) rehydrateMissingCanvasItems(
+	ctx context.Context,
+	ds *types.DataSource,
+	connector datasource.Connector,
+	config *types.DataSourceConfig,
+	items []types.FetchedItem,
+) ([]types.FetchedItem, error) {
+	if ds.Type != types.ConnectorTypeCanvas || len(items) == 0 {
+		return items, nil
+	}
+
+	repo := s.knowledgeService.GetRepository()
+	missingIDs := make([]string, 0)
+	missingIndexes := make(map[string][]int)
+	for i := range items {
+		item := &items[i]
+		if !item.IsSkipped || item.ExternalID == "" {
+			continue
+		}
+		existing, err := repo.FindByDataSourceExternalID(
+			ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("check skipped Canvas item %s: %w", item.ExternalID, err)
+		}
+		if existing != nil {
+			continue
+		}
+		if _, seen := missingIndexes[item.ExternalID]; !seen {
+			missingIDs = append(missingIDs, item.ExternalID)
+		}
+		missingIndexes[item.ExternalID] = append(missingIndexes[item.ExternalID], i)
+	}
+	if len(missingIDs) == 0 {
+		return items, nil
+	}
+
+	logger.Infof(ctx, "restoring %d Canvas item(s) missing from knowledge base", len(missingIDs))
+	refetched, err := connector.FetchAll(ctx, config, missingIDs)
+	if err != nil {
+		return nil, fmt.Errorf("refetch missing Canvas items: %w", err)
+	}
+	restored := make(map[string]struct{}, len(refetched))
+	for i := range refetched {
+		item := refetched[i]
+		indexes := missingIndexes[item.ExternalID]
+		if len(indexes) == 0 {
+			continue
+		}
+		restored[item.ExternalID] = struct{}{}
+		for _, index := range indexes {
+			// Preserve the configured course/folder ownership from the incremental
+			// inventory; a direct file refetch reports the file itself as source.
+			item.SourceResourceID = items[index].SourceResourceID
+			item.IsSkipped = false
+			items[index] = item
+		}
+	}
+	for _, externalID := range missingIDs {
+		if _, ok := restored[externalID]; !ok {
+			return nil, fmt.Errorf("refetch missing Canvas item %s returned no content", externalID)
+		}
+	}
+
+	return items, nil
+}
+
 func (s *DataSourceService) updateSyncRunResult(
 	ctx context.Context,
 	ds *types.DataSource,
@@ -1129,6 +1398,14 @@ func (s *DataSourceService) ValidateCredentials(ctx context.Context, connectorTy
 		Type:        connectorType,
 		Credentials: credentials,
 	}
+	if connectorType == types.ConnectorTypeCanvas {
+		// Stateless test: inject workspace app credentials from current tenant.
+		if tenantID, ok := types.TenantIDFromContext(ctx); ok && s.tenantRepo != nil {
+			if tenant, err := s.tenantRepo.GetTenantByID(ctx, tenantID); err == nil && tenant != nil {
+				s.enrichCanvasConfig(ctx, &types.DataSource{Type: connectorType, TenantID: tenantID}, config)
+			}
+		}
+	}
 
 	if err := connector.Validate(ctx, config); err != nil {
 		return err
@@ -1149,6 +1426,10 @@ func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *ty
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
+	if config == nil {
+		config = &types.DataSourceConfig{Type: ds.Type}
+	}
+	s.enrichCanvasConfig(ctx, ds, config)
 
 	return connector.Validate(ctx, config)
 }
@@ -1187,7 +1468,15 @@ func (s *DataSourceService) ingestItem(ctx context.Context, ds *types.DataSource
 	isUpdate := false
 	if item.ExternalID != "" {
 		repo := s.knowledgeService.GetRepository()
-		existing, err := repo.FindByMetadataKey(ctx, ds.TenantID, ds.KnowledgeBaseID, "external_id", item.ExternalID)
+		var existing *types.Knowledge
+		var err error
+		if ds.Type == types.ConnectorTypeCanvas {
+			// Scope the lookup to items owned by this data source so identical
+			// external IDs from two data sources cannot collide.
+			existing, err = repo.FindByDataSourceExternalID(ctx, ds.TenantID, ds.KnowledgeBaseID, ds.ID, item.ExternalID)
+		} else {
+			existing, err = repo.FindByMetadataKey(ctx, ds.TenantID, ds.KnowledgeBaseID, "external_id", item.ExternalID)
+		}
 		if err != nil {
 			logger.Warnf(ctx, "failed to check existing knowledge for external_id=%s: %v", item.ExternalID, err)
 			// Non-fatal: proceed with creation (may produce duplicate)

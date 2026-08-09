@@ -16,6 +16,11 @@ import { useAuthStore } from '@/stores/auth';
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 import KnowledgeBaseEditorModal from './KnowledgeBaseEditorModal.vue';
+import { getDataSource } from '@/api/datasource';
+import {
+  monitorDataSourceSync,
+  type DataSourceSyncStartedEvent,
+} from './settings/dataSourceSyncMonitor';
 const usemenuStore = useMenuStore();
 const uiStore = useUIStore();
 const orgStore = useOrganizationStore();
@@ -1273,6 +1278,8 @@ onUnmounted(() => {
   window.removeEventListener('weknora:knowledge-file-drop', handleKnowledgeFileDrop as EventListener);
   window.removeEventListener('weknora:open-knowledge', handleOpenKnowledgeEvent as EventListener);
   stopMovePoll();
+  for (const controller of dataSourceSyncMonitors.values()) controller.abort();
+  dataSourceSyncMonitors.clear();
   if (timeout !== null) {
     clearTimeout(timeout);
     timeout = null;
@@ -2213,6 +2220,33 @@ const handleKBEditorSuccess = (kbIdValue: string) => {
   }
 };
 
+const dataSourceSyncMonitors = new Map<string, AbortController>();
+
+const handleDataSourceSyncStarted = (event: DataSourceSyncStartedEvent) => {
+  dataSourceSyncMonitors.get(event.dataSourceId)?.abort();
+
+  const controller = new AbortController();
+  dataSourceSyncMonitors.set(event.dataSourceId, controller);
+
+  void monitorDataSourceSync({
+    targetSyncLogId: event.syncLogId,
+    signal: controller.signal,
+    fetchDataSource: async () => {
+      const response: any = await getDataSource(event.dataSourceId);
+      return response?.data || response || {};
+    },
+    refreshKnowledge: async () => {
+      if (!controller.signal.aborted && event.kbId === kbId.value) {
+        await loadKnowledgeFiles(event.kbId);
+      }
+    },
+  }).finally(() => {
+    if (dataSourceSyncMonitors.get(event.dataSourceId) === controller) {
+      dataSourceSyncMonitors.delete(event.dataSourceId);
+    }
+  });
+};
+
 const getTitle = (session_id: string, value: string) => {
   const now = new Date().toISOString();
   let obj = {
@@ -2656,7 +2690,8 @@ async function createNewSession(value: string): Promise<void> {
   <!-- 知识库编辑器（创建/编辑统一组件） -->
   <KnowledgeBaseEditorModal :visible="uiStore.showKBEditorModal" :mode="uiStore.kbEditorMode"
     :kb-id="uiStore.currentKBId || undefined" :initial-type="uiStore.kbEditorType"
-    @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
+    @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess"
+    @data-source-sync-started="handleDataSourceSyncStarted" />
 
   <ContextualGuide tour="kbDetail" :when="showKbDetailContextualGuide" />
 

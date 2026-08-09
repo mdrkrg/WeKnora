@@ -51,6 +51,16 @@ spec:
               value: {{ .Values.app.env.GIN_MODE | quote }}
             - name: TZ
               value: {{ .Values.app.env.TZ | quote }}
+            # Canvas OAuth app credentials (deployment-level / site-global)
+            - name: CANVAS_OAUTH_BASE_URL
+              value: {{ .Values.app.env.CANVAS_OAUTH_BASE_URL | quote }}
+            - name: CANVAS_OAUTH_CLIENT_ID
+              value: {{ .Values.app.env.CANVAS_OAUTH_CLIENT_ID | quote }}
+            - name: CANVAS_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "weknora.secretName" . }}
+                  key: CANVAS_OAUTH_CLIENT_SECRET
             # Database configuration
             - name: DB_DRIVER
               value: "postgres"
