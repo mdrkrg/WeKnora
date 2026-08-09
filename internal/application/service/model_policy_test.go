@@ -310,6 +310,47 @@ func TestPrepareModelForRuntimeRejectsWhenFixedModelUnavailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "fixed to builtin-missing")
 }
 
+func TestPrepareModelForRuntimeRejectsWrongTypedFixedBinding(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:        "enforce",
+		settingProviderCatalog:        `[]`,
+		settingFixedIngestEmbeddingID: "builtin-chat", // wrong type: KnowledgeQA
+	})
+	fixed := &types.Model{ID: "builtin-chat", Type: types.ModelTypeKnowledgeQA, Status: types.ModelStatusActive, IsBuiltin: true, Source: types.ModelSourceLocal}
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{"builtin-chat": fixed}},
+		settings,
+	)
+
+	// A wrong-typed fixed binding must not be silently substituted into a
+	// background task: enforce mode fails loudly so the misconfiguration is
+	// visible instead of degrading the pipeline.
+	stored := &types.Model{ID: "legacy-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, Source: types.ModelSourceLocal}
+	_, err := svc.PrepareModelForRuntime(types.WithBackgroundTask(policyContext()), stored)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fixed to builtin-chat")
+}
+
+func TestPrepareModelForRuntimeRejectsZeroDimensionFixedEmbedding(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:        "enforce",
+		settingProviderCatalog:        `[]`,
+		settingFixedIngestEmbeddingID: "builtin-embedding-zero",
+	})
+	fixed := &types.Model{ID: "builtin-embedding-zero", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, IsBuiltin: true, Source: types.ModelSourceLocal}
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{"builtin-embedding-zero": fixed}},
+		settings,
+	)
+
+	// An embedding binding without a positive dimension cannot produce
+	// usable vectors; substitution must fail loudly in enforce mode.
+	stored := &types.Model{ID: "legacy-embedding", Type: types.ModelTypeEmbedding, Status: types.ModelStatusActive, Source: types.ModelSourceLocal}
+	_, err := svc.PrepareModelForRuntime(types.WithBackgroundTask(policyContext()), stored)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fixed to builtin-embedding-zero")
+}
+
 func TestPrepareModelForRuntimeDoesNotInterveneOutsideEnforce(t *testing.T) {
 	settings := newPolicySettingsStub(map[string]any{
 		settingModelPolicyMode:        "audit",
