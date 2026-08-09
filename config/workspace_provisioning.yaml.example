@@ -41,6 +41,17 @@ defaults:
 # Governance policy, deployment-owned. Present while enabled, this becomes
 # the effective ModelGovernancePolicy (fixed ingestion bindings and the
 # locked parser profile). References must be existing active builtin models.
+#
+# OPERATIONAL NOTES (enforce mode):
+# - Enable the manifest on a deployment that starts enforcing from day one.
+#   KBs created before enforce keep their stored ingest models; ingestion
+#   converges to the fixed bindings automatically (logged as warnings), so
+#   no per-KB migration is required. KBs that explicitly request a different
+#   ingest model are still rejected.
+# - The provider catalog must list every remote model provider in use.
+#   With an empty or incomplete catalog, enforce rejects models whose
+#   provider is not approved — including interactive chat calls.
+#   Use mode: audit first to observe violations before enforcing.
 policy:
   mode: enforce
   require_explicit_provider: true
