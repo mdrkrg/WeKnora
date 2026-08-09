@@ -178,6 +178,10 @@ func (h *AuthHandler) RegisterByInvite(c *gin.Context) {
 	if err != nil {
 		logger.Errorf(ctx, "register-by-invite: user create failed for %s: %v",
 			secutils.SanitizeForLog(req.Email), err)
+		if appErr, ok := apperrors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
 		c.Error(apperrors.NewBadRequestError(err.Error()))
 		return
 	}
