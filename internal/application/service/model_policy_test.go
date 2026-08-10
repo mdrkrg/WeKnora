@@ -408,3 +408,139 @@ func TestValidateProcessOverridesAllowsEnabledEmptyWithoutFixedBinding(t *testin
 	err := svc.ValidateProcessOverrides(policyContext(), &types.KnowledgeBase{}, overrides, []string{"pdf"})
 	require.NoError(t, err)
 }
+
+func platformParserProfile(t *testing.T) types.ParserProfile {
+	t.Helper()
+	return types.ParserProfile{
+		ID:        "deploy-mineru",
+		Engine:    "mineru",
+		FileTypes: []string{"pdf"},
+		Overrides: map[string]string{"mineru_endpoint": "https://mineru.platform.invalid"},
+	}
+}
+
+func TestApplyPlatformParserOverridesInjectsInEnforce(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "enforce",
+		settingProviderCatalog:    `[]`,
+		settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	merged := map[string]string{
+		"mineru_endpoint":   "https://tenant.mineru.invalid",
+		"pdf_force_scanned": "true",
+	}
+	result := svc.ApplyPlatformParserOverrides(policyContext(), merged)
+	require.Equal(t, "https://mineru.platform.invalid", result["mineru_endpoint"])
+	assert.Equal(t, "true", result["pdf_force_scanned"])
+}
+
+func TestApplyPlatformParserOverridesSkipsOutsideEnforce(t *testing.T) {
+	for _, mode := range []string{"off", "audit"} {
+		settings := newPolicySettingsStub(map[string]any{
+			settingModelPolicyMode:    mode,
+			settingProviderCatalog:    `[]`,
+			settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+		})
+		svc := NewModelPolicyService(
+			&policyModelRepoStub{models: map[string]*types.Model{}},
+			settings,
+		)
+
+		merged := map[string]string{"mineru_endpoint": "https://tenant.mineru.invalid"}
+		result := svc.ApplyPlatformParserOverrides(policyContext(), merged)
+		assert.Equal(t, "https://tenant.mineru.invalid", result["mineru_endpoint"], "mode %s must not inject", mode)
+	}
+}
+
+func TestValidateProcessOverridesRejectsPlatformOwnedOverrideKey(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "enforce",
+		settingProviderCatalog:    `[]`,
+		settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	overrides := &types.KnowledgeProcessOverrides{
+		ParserEngineOverrides: map[string]string{"mineru_endpoint": "https://tenant.mineru.invalid"},
+	}
+	err := svc.ValidateProcessOverrides(policyContext(), &types.KnowledgeBase{}, overrides, []string{"pdf"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mineru_endpoint")
+	assert.Contains(t, err.Error(), "locked by platform profile")
+}
+
+func TestValidateProcessOverridesAuditLogsPlatformOwnedOverrideKey(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "audit",
+		settingProviderCatalog:    `[]`,
+		settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	overrides := &types.KnowledgeProcessOverrides{
+		ParserEngineOverrides: map[string]string{"mineru_endpoint": "https://tenant.mineru.invalid"},
+	}
+	err := svc.ValidateProcessOverrides(policyContext(), &types.KnowledgeBase{}, overrides, []string{"pdf"})
+	require.NoError(t, err)
+}
+
+func TestValidateTenantParserConfigRejectsLockedKeyInEnforce(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "enforce",
+		settingProviderCatalog:    `[]`,
+		settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	config := &types.ParserEngineConfig{MinerUEndpoint: "https://tenant.mineru.invalid"}
+	err := svc.ValidateTenantParserConfig(policyContext(), config)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mineru_endpoint")
+	assert.Contains(t, err.Error(), "locked by platform profile")
+}
+
+func TestValidateTenantParserConfigAllowsUnlockedKeys(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "enforce",
+		settingProviderCatalog:    `[]`,
+		settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	config := &types.ParserEngineConfig{MinerULanguage: "en"}
+	err := svc.ValidateTenantParserConfig(policyContext(), config)
+	require.NoError(t, err)
+}
+
+func TestValidateTenantParserConfigAuditLogsLockedKey(t *testing.T) {
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "audit",
+		settingProviderCatalog:    `[]`,
+		settingFixedParserProfile: parserProfileJSON(t, platformParserProfile(t)),
+	})
+	svc := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+
+	config := &types.ParserEngineConfig{MinerUEndpoint: "https://tenant.mineru.invalid"}
+	err := svc.ValidateTenantParserConfig(policyContext(), config)
+	require.NoError(t, err)
+}

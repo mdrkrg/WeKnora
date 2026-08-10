@@ -386,10 +386,82 @@ func (s *modelPolicyService) ValidateProcessOverrides(
 			return handled
 		}
 	}
-	locked := stringSet(profile.LockedOverrideKeys)
+	locked := parserProfileLockedKeys(profile)
 	for key := range overrides.ParserEngineOverrides {
-		if _, ok := locked[key]; ok {
+		if _, ok := locked[normalizeFileType(key)]; ok {
 			err := fmt.Errorf("parser override %q is locked by platform profile %s", key, profile.ID)
+			if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {
+				return handled
+			}
+		}
+	}
+	return nil
+}
+
+// parserProfileLockedKeys returns the override keys tenants may no longer
+// touch: explicitly locked keys plus every key the profile supplies a
+// deployment value for (platform-owned by definition).
+func parserProfileLockedKeys(profile *types.ParserProfile) map[string]struct{} {
+	locked := stringSet(profile.LockedOverrideKeys)
+	for key := range profile.Overrides {
+		locked[normalizeFileType(key)] = struct{}{}
+	}
+	return locked
+}
+
+// ApplyPlatformParserOverrides overlays the deployment-supplied parser
+// override values (e.g. mineru_endpoint) on top of the merged tenant/upload
+// overrides. Enforce mode only: the platform owns these keys, so its values
+// always win. Off/audit return the map unchanged; conflicts are reported
+// through ValidateProcessOverrides instead of being silently overridden.
+func (s *modelPolicyService) ApplyPlatformParserOverrides(
+	ctx context.Context,
+	merged map[string]string,
+) map[string]string {
+	policy, err := s.GetPolicy(ctx)
+	if err != nil {
+		logger.Errorf(ctx, "[model-policy] failed to load policy while applying platform parser overrides: %v", err)
+		return merged
+	}
+	if policy.Mode != types.ModelPolicyModeEnforce || policy.ParserProfile == nil || len(policy.ParserProfile.Overrides) == 0 {
+		return merged
+	}
+	result := make(map[string]string, len(merged)+len(policy.ParserProfile.Overrides))
+	for key, value := range merged {
+		result[key] = value
+	}
+	for key, value := range policy.ParserProfile.Overrides {
+		if existing, ok := result[key]; ok && existing != value {
+			logger.Warnf(ctx, "[model-policy] parser override %q overridden by platform profile %s", key, policy.ParserProfile.ID)
+		}
+		result[key] = value
+	}
+	return result
+}
+
+// ValidateTenantParserConfig rejects tenant workspace parser-engine config
+// saves that touch platform-owned override keys (locked_override_keys plus
+// keys the profile supplies a value for). Enforce rejects with 400, audit
+// logs, off passes. Parse-time injection is not gated on this check; it
+// protects tenants from persisting inert values.
+func (s *modelPolicyService) ValidateTenantParserConfig(
+	ctx context.Context,
+	config *types.ParserEngineConfig,
+) error {
+	if config == nil || len(config.ToOverridesMap()) == 0 {
+		return nil
+	}
+	policy, err := s.GetPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	if policy.ParserProfile == nil {
+		return nil
+	}
+	locked := parserProfileLockedKeys(policy.ParserProfile)
+	for key := range config.ToOverridesMap() {
+		if _, ok := locked[normalizeFileType(key)]; ok {
+			err := fmt.Errorf("parser override %q is locked by platform profile %s", key, policy.ParserProfile.ID)
 			if handled := s.handleViolation(ctx, policy.Mode, err); handled != nil {
 				return handled
 			}
@@ -697,6 +769,17 @@ func normalizeParserProfile(profile *types.ParserProfile) error {
 		normalizedLocked = append(normalizedLocked, key)
 	}
 	profile.LockedOverrideKeys = normalizedLocked
+	if len(profile.Overrides) > 0 {
+		normalizedOverrides := make(map[string]string, len(profile.Overrides))
+		for key, value := range profile.Overrides {
+			key = normalizeFileType(key)
+			if key == "" {
+				continue
+			}
+			normalizedOverrides[key] = strings.TrimSpace(value)
+		}
+		profile.Overrides = normalizedOverrides
+	}
 	return nil
 }
 

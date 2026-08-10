@@ -102,6 +102,7 @@ type temporaryDocumentService struct {
 	modelService    interfaces.ModelService
 	tenantService   interfaces.TenantService
 	taskEnqueuer    interfaces.TaskEnqueuer
+	modelPolicy     interfaces.ModelPolicyService
 }
 
 func NewTemporaryDocumentService(
@@ -113,11 +114,13 @@ func NewTemporaryDocumentService(
 	modelService interfaces.ModelService,
 	tenantService interfaces.TenantService,
 	taskEnqueuer interfaces.TaskEnqueuer,
+	modelPolicy interfaces.ModelPolicyService,
 ) interfaces.TemporaryDocumentService {
 	return &temporaryDocumentService{
 		repo: repo, fileService: fileService, resourceCatalog: resourceCatalog,
 		documentReader: documentReader, imageResolver: imageResolver,
 		modelService: modelService, tenantService: tenantService, taskEnqueuer: taskEnqueuer,
+		modelPolicy: modelPolicy,
 	}
 }
 
@@ -219,6 +222,9 @@ func (s *temporaryDocumentService) supportsExtension(ctx context.Context, tenant
 	var overrides map[string]string
 	if tenant, err := s.tenantService.GetTenantByID(ctx, tenantID); err == nil && tenant != nil {
 		overrides = tenant.ParserEngineConfig.ToOverridesMap()
+	}
+	if s.modelPolicy != nil {
+		overrides = s.modelPolicy.ApplyPlatformParserOverrides(ctx, overrides)
 	}
 	engines, err := s.documentReader.ListEngines(ctx, overrides)
 	if err != nil {
@@ -393,6 +399,9 @@ func (s *temporaryDocumentService) parse(ctx context.Context, document *types.Te
 	}
 	if tenant, ok := ctx.Value(types.TenantInfoContextKey).(*types.Tenant); ok && tenant != nil && tenant.ParserEngineConfig != nil {
 		request.ParserEngineOverrides = tenant.ParserEngineConfig.ToOverridesMap()
+	}
+	if s.modelPolicy != nil {
+		request.ParserEngineOverrides = s.modelPolicy.ApplyPlatformParserOverrides(ctx, request.ParserEngineOverrides)
 	}
 	var result *types.ReadResult
 	if docparser.IsSimpleFormat(ext) && (request.ParserEngine == "" || request.ParserEngine == "auto") {

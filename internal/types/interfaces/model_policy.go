@@ -23,4 +23,6 @@ type ModelPolicyService interface {
 		fileTypes []string,
 	) error
 	ApplyEffectiveProcessPolicy(ctx context.Context, eff *types.EffectiveProcessConfig) error
+	ApplyPlatformParserOverrides(ctx context.Context, merged map[string]string) map[string]string
+	ValidateTenantParserConfig(ctx context.Context, config *types.ParserEngineConfig) error
 }

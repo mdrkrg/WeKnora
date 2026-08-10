@@ -27,14 +27,17 @@ type PlatformModelProvider struct {
 	ManagedBy string `yaml:"-" json:"managed_by,omitempty"`
 }
 
-// ParserProfile is the platform-owned document parser binding. LockedOverrideKeys
-// are override keys tenants may no longer change; runtime secret injection is
-// intentionally out of scope (secrets stay in deployment-managed files).
-type ParserProfile struct {
-	ID                 string   `yaml:"id" json:"id"`
-	Engine             string   `yaml:"engine" json:"engine"`
-	FileTypes          []string `yaml:"file_types" json:"file_types"`
-	LockedOverrideKeys []string `yaml:"locked_override_keys,omitempty" json:"locked_override_keys,omitempty"`
+// ParserProfile is the platform-owned document parser binding. Overrides are
+// deployment-supplied parser values (e.g. mineru_endpoint) injected at parse
+// time in enforce mode; their keys are locked so tenants cannot override
+// them. LockedOverrideKeys locks additional keys without supplying a value.
+// Runtime secret injection is intentionally out of scope (secrets stay in
+// deployment-managed files and env vars referenced by ${NAME}).
+type ParserProfile struct {	ID                 string            `yaml:"id" json:"id"`
+	Engine             string            `yaml:"engine" json:"engine"`
+	FileTypes          []string          `yaml:"file_types" json:"file_types"`
+	Overrides          map[string]string `yaml:"overrides,omitempty" json:"overrides,omitempty"`
+	LockedOverrideKeys []string          `yaml:"locked_override_keys,omitempty" json:"locked_override_keys,omitempty"`
 }
 
 // ModelGovernancePolicy is the deployment-facing effective policy document.

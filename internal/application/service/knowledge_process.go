@@ -3611,6 +3611,9 @@ func (s *knowledgeService) convert(
 		uploadOverrides = processOverrides.ParserEngineOverrides
 	}
 	mergedOverrides := MergeParserEngineOverrides(tenantOverrides, uploadOverrides)
+	if s.modelPolicy != nil {
+		mergedOverrides = s.modelPolicy.ApplyPlatformParserOverrides(ctx, mergedOverrides)
+	}
 	applyParserRuleOverrides(mergedOverrides, eff.ChunkingConfig, fileType)
 
 	if isURL {

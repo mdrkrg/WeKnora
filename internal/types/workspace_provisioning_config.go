@@ -183,6 +183,9 @@ func (cfg *WorkspaceProvisioningConfig) normalizeAndValidate() error {
 	if cfg.Defaults.ParserProfile == nil {
 		return fmt.Errorf("default parser profile is required")
 	}
+	if len(cfg.Defaults.ParserProfile.Overrides) > 0 {
+		return fmt.Errorf("parser overrides belong in policy.parser_profile, not defaults.parser_profile")
+	}
 	return normalizeWorkspaceParserProfile(cfg.Defaults.ParserProfile)
 }
 
@@ -212,6 +215,18 @@ func normalizeWorkspaceParserProfile(profile *ParserProfile) error {
 		return fmt.Errorf("parser profile file types are required")
 	}
 	profile.FileTypes = fileTypes
+
+	if len(profile.Overrides) > 0 {
+		normalizedOverrides := make(map[string]string, len(profile.Overrides))
+		for key, value := range profile.Overrides {
+			key = normalizeWorkspaceFileType(key)
+			if key == "" {
+				continue
+			}
+			normalizedOverrides[key] = strings.TrimSpace(value)
+		}
+		profile.Overrides = normalizedOverrides
+	}
 
 	return nil
 }
