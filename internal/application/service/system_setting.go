@@ -92,6 +92,12 @@ type settingSpec struct {
 	// (e.g. asynq worker pool size). The UI shows a restart badge; the
 	// service persists the flag on first write.
 	RequiresRestart bool
+	// IsSecret marks keys whose value is a credential (e.g. an app
+	// secret shared across a whole instance). The service encrypts the
+	// value at rest (AES-GCM, SYSTEM_AES_KEY), masks it on every read
+	// path, and exposes only a SecretConfigured boolean to the UI.
+	// Only Type=="string" keys may be secrets.
+	IsSecret bool
 }
 
 // registry pins the set of legal keys. Expanding it is a deliberate,
@@ -209,6 +215,32 @@ var registry = map[string]settingSpec{
 		Description: "全局开关：开启后，空间管理员通过邮箱邀请已注册用户加入空间时，" +
 			"被邀请人将被立即自动加入（直接写入成员关系），无需在收件箱手动接受，也不再生成待接受的邀请记录。" +
 			"关闭时保持原有「发出邀请 → 被邀请人收件箱确认」流程。每次邀请时实时读取，修改后立即生效。默认 false。",
+	},
+	// Instance-level Feishu app credentials (feishu.app_id / feishu.app_secret):
+	// one shared Feishu application serves every tenant, so the app credential
+	// is configured once by a SystemAdmin instead of being repeated in each
+	// data source form. feishu.app_secret is IsSecret: encrypted at rest,
+	// masked on every read path (only SecretConfigured reaches the UI), and
+	// resolved via the standard 3-tier ladder (DB > ENV > default) for future
+	// connectors. Not yet consumed by the Feishu datasource connector — the
+	// consumer PR lands together with the per-datasource OAuth flow.
+	"feishu.app_id": {
+		Type:        "string",
+		EnvName:     "",
+		Default:     "",
+		Category:    "feishu",
+		Description: "实例级飞书应用凭证（app_id）。一个站点共享同一个飞书应用，由站点管理员统一配置一次，" +
+			"所有租户的数据源共用；普通用户创建飞书数据源时无需填写。修改后立即生效。",
+	},
+	"feishu.app_secret": {
+		Type:        "string",
+		EnvName:     "",
+		Default:     "",
+		Category:    "feishu",
+		IsSecret:    true,
+		Description: "实例级飞书应用凭证（app_secret）。加密存储、任何接口均不返回明文，" +
+			"UI 仅显示「已配置」状态；留空保存表示保持原值不变。站点管理员统一配置，" +
+			"普通用户创建飞书数据源时无需填写。",
 	},
 	"asynq.core_concurrency": {
 		Type:            "int",
@@ -580,6 +612,9 @@ func (s *systemSettingService) resolveRaw(ctx context.Context, key string) (raw 
 			if known && isBootstrapDefaultRow(row, spec) {
 				return nil, false
 			}
+			if known && spec.IsSecret {
+				return decryptSecretRaw(ctx, key, row)
+			}
 			return row.Value, true
 		}
 		// Cache populated and key not present → authoritative miss.
@@ -598,7 +633,35 @@ func (s *systemSettingService) resolveRaw(ctx context.Context, key string) (raw 
 	if known && isBootstrapDefaultRow(row, spec) {
 		return nil, false
 	}
+	if known && spec.IsSecret {
+		return decryptSecretRaw(ctx, key, row)
+	}
 	return row.Value, true
+}
+
+// decryptSecretRaw decodes a persisted secret row for the resolver hot path.
+// Legacy plaintext (no enc:v1: prefix) passes through untouched. Ciphertext
+// that cannot be decrypted (rotated/missing SYSTEM_AES_KEY) degrades to the
+// env/default ladder with a loud warning — sending ciphertext upstream as a
+// credential is never acceptable.
+func decryptSecretRaw(ctx context.Context, key string, row *types.SystemSetting) (types.JSON, bool) {
+	var stored string
+	if err := json.Unmarshal(row.Value, &stored); err != nil {
+		return nil, false
+	}
+	if !strings.HasPrefix(stored, utils.EncPrefix) {
+		return row.Value, true
+	}
+	plain, err := utils.DecryptStoredSecret(stored)
+	if err != nil {
+		logger.Warnf(ctx, "[system_settings] %q: secret decrypt failed (%v), falling back to env/default", key, err)
+		return nil, false
+	}
+	encoded, err := json.Marshal(plain)
+	if err != nil {
+		return nil, false
+	}
+	return types.JSON(encoded), true
 }
 
 // GetInt resolves an int64 setting. Priority: DB > ENV > def. Returns
@@ -740,7 +803,11 @@ func (s *systemSettingService) List(ctx context.Context) ([]*types.SystemSetting
 			if isBootstrapDefaultRow(row, spec) {
 				row.Value = s.fallbackJSONForSpec(key, spec)
 			}
-			out = append(out, row)
+			if spec.IsSecret {
+				out = append(out, redactSecretForRead(row))
+			} else {
+				out = append(out, row)
+			}
 			delete(byKey, key)
 			continue
 		}
@@ -780,6 +847,9 @@ func (s *systemSettingService) Get(ctx context.Context, key string) (*types.Syst
 		if isBootstrapDefaultRow(row, spec) {
 			row.Value = s.fallbackJSONForSpec(key, spec)
 		}
+		if spec.IsSecret {
+			return redactSecretForRead(row), nil
+		}
 		return row, nil
 	}
 	return s.virtualSetting(key, spec), nil
@@ -790,17 +860,68 @@ func (s *systemSettingService) virtualSetting(key string, spec settingSpec) *typ
 	if category == "" {
 		category = "general"
 	}
-	return &types.SystemSetting{
-		Key:             key,
-		Value:           s.fallbackJSONForSpec(key, spec),
-		ValueType:       spec.Type,
-		Category:        category,
-		Description:     spec.Description,
-		IsSecret:        false,
-		RequiresRestart: spec.RequiresRestart,
-		LastModifiedBy:  "",
-		Enum:            spec.Enum,
+	value := s.fallbackJSONForSpec(key, spec)
+	var secretConfigured bool
+	if spec.IsSecret {
+		// Secret keys never expose a value on read paths — not even the
+		// ENV fallback — so the management UI cannot leak credentials.
+		value = types.JSON(`""`)
+		secretConfigured = spec.EnvName != "" && strings.TrimSpace(os.Getenv(spec.EnvName)) != ""
 	}
+	return &types.SystemSetting{
+		Key:              key,
+		Value:            value,
+		ValueType:        spec.Type,
+		Category:         category,
+		Description:      spec.Description,
+		IsSecret:         spec.IsSecret,
+		RequiresRestart:  spec.RequiresRestart,
+		LastModifiedBy:   "",
+		SecretConfigured: secretConfigured,
+		Enum:             spec.Enum,
+	}
+}
+
+// secretConfigured reports whether a persisted row carries a non-empty secret
+// value (ciphertext or legacy plaintext).
+func secretConfigured(row *types.SystemSetting) bool {
+	if row == nil || len(row.Value) == 0 {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(row.Value, &s); err != nil {
+		return false
+	}
+	return strings.TrimSpace(s) != ""
+}
+
+// redactSecretForRead returns a shallow copy of a secret row whose value is
+// replaced with an empty string and whose SecretConfigured flag reflects the
+// stored value. The caller's row is never mutated — List/Get cache copies in
+// memory that must keep the ciphertext for the resolver hot path.
+func redactSecretForRead(row *types.SystemSetting) *types.SystemSetting {
+	cp := *row
+	cp.Value = types.JSON(`""`)
+	cp.SecretConfigured = secretConfigured(row)
+	return &cp
+}
+
+// encodeSecretValue encrypts a plaintext secret (AES-GCM via SYSTEM_AES_KEY)
+// and returns its JSON encoding for persistence. Rejects the write when the
+// encryption key is missing so a secret is never silently stored in plaintext.
+func encodeSecretValue(plain string) (types.JSON, error) {
+	if utils.GetAESKey() == nil {
+		return nil, fmt.Errorf("SYSTEM_AES_KEY is not set or has wrong length (need 32 bytes) to store secret settings")
+	}
+	encrypted, err := utils.EncryptAESGCM(plain, utils.GetAESKey())
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(encrypted)
+	if err != nil {
+		return nil, err
+	}
+	return types.JSON(encoded), nil
 }
 
 func (s *systemSettingService) fallbackJSONForSpec(key string, spec settingSpec) types.JSON {
@@ -961,6 +1082,31 @@ func (s *systemSettingService) Update(ctx context.Context, key string, rawValue 
 		description = spec.Description
 		requiresRestart = spec.RequiresRestart
 	}
+	// The registry is the source of truth for secret-ness: a key declared
+	// IsSecret stays secret even if an old row was persisted with the flag
+	// cleared (and vice versa only if a key is ever downgraded).
+	isSecret = spec.IsSecret || isSecret
+
+	if spec.IsSecret {
+		// Secrets are always "string" typed. Decode the canonical JSON back
+		// to plaintext, then encrypt for persistence.
+		var plain string
+		if err := json.Unmarshal(encoded, &plain); err != nil {
+			return nil, fmt.Errorf("invalid secret value for %q: %w", key, err)
+		}
+		if prev != nil && secretConfigured(prev) && plain == "" {
+			// Leave-blank keeps the current secret: no-op that surfaces the
+			// masked row so the UI's save handshake stays consistent.
+			masked := redactSecretForRead(prev)
+			masked.Enum = spec.Enum
+			return masked, nil
+		}
+		secretEncoded, err := encodeSecretValue(plain)
+		if err != nil {
+			return nil, fmt.Errorf("store secret %q: %w", key, err)
+		}
+		encoded = secretEncoded
+	}
 
 	row := &types.SystemSetting{
 		Key:             key,
@@ -995,7 +1141,8 @@ func (s *systemSettingService) Update(ctx context.Context, key string, rawValue 
 
 	// Update local cache inline so this replica's next read sees the
 	// new value without waiting for the pubsub roundtrip. Other replicas
-	// pick it up via publishChange below.
+	// pick it up via publishChange below. The cache keeps the RAW row
+	// (ciphertext) — only the API-facing return value is masked.
 	s.mu.Lock()
 	s.cache[key] = persisted
 	s.mu.Unlock()
@@ -1004,7 +1151,14 @@ func (s *systemSettingService) Update(ctx context.Context, key string, rawValue 
 	s.dispatchSideEffects(ctx, key)
 
 	s.publishChange(ctx, key)
-	s.emitChangeAudit(ctx, key, spec.Type, oldValue, encoded)
+	if isSecret {
+		s.emitChangeAudit(ctx, key, spec.Type, oldValue, encoded, true)
+		// Mask before returning so the caller never receives ciphertext.
+		apiRow := redactSecretForRead(persisted)
+		apiRow.Enum = spec.Enum
+		return apiRow, nil
+	}
+	s.emitChangeAudit(ctx, key, spec.Type, oldValue, encoded, false)
 	return persisted, nil
 }
 
@@ -1049,7 +1203,7 @@ func (s *systemSettingService) Reset(ctx context.Context, key string) error {
 	// is intentionally null to flag this as a reset (vs an Update
 	// which always writes a concrete new_value).
 	if deleted && prev != nil {
-		s.emitChangeAudit(ctx, key, spec.Type, prev.Value, nil)
+		s.emitChangeAudit(ctx, key, spec.Type, prev.Value, nil, spec.IsSecret)
 	}
 	return nil
 }
@@ -1150,10 +1304,16 @@ func (s *systemSettingService) consumeMessages(ctx context.Context, ch <-chan *r
 // This mirrors tenantMemberService.emitAudit's failure semantics: the
 // business op (config update) succeeds even if audit is broken.
 func (s *systemSettingService) emitChangeAudit(
-	ctx context.Context, key, valueType string, oldValue, newValue types.JSON,
+	ctx context.Context, key, valueType string, oldValue, newValue types.JSON, isSecret bool,
 ) {
 	if s.audit == nil {
 		return
+	}
+	if isSecret {
+		// Never write secret material (plaintext or ciphertext) into the
+		// audit log — redact both sides while keeping the fact of the change.
+		oldValue = types.JSON(`"[redacted]"`)
+		newValue = types.JSON(`"[redacted]"`)
 	}
 	details, _ := json.Marshal(map[string]any{
 		"key":        key,

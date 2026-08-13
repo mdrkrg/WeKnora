@@ -35,13 +35,14 @@ type SystemSetting struct {
 	// data-only change.
 	Category    string `gorm:"type:varchar(32);not null"  json:"category"`
 	Description string `gorm:"type:text;not null;default:''" json:"description"`
-	// IsSecret reserves UI affordances for P3 (mask + reveal-with-confirm).
-	// In P1 every row is is_secret=false; service Update accepts the
-	// column but does not yet enforce special handling.
+	// IsSecret marks keys whose value is a credential (e.g. an app_secret).
+	// The service encrypts such values at rest (AES-GCM via SYSTEM_AES_KEY)
+	// and masks them on every read path: List/Get/Update return an empty
+	// value plus SecretConfigured, never the ciphertext or plaintext.
 	IsSecret bool `gorm:"not null;default:false"  json:"is_secret"`
-	// RequiresRestart reserves UI affordances for P3 (banner "this
-	// change won't take effect until the next restart"). In P1 the
-	// only seeded key is per-request, so always false.
+	// RequiresRestart marks keys whose value is bound at process startup
+	// (e.g. asynq worker pool size). The UI shows a restart badge; the
+	// service persists the flag on first write.
 	RequiresRestart bool      `gorm:"not null;default:false"  json:"requires_restart"`
 	LastModifiedBy  string    `gorm:"type:varchar(36);not null;default:''" json:"last_modified_by"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -52,6 +53,12 @@ type SystemSetting struct {
 	// means the UI should render a select with these options. Tagged
 	// `gorm:"-"` so GORM never tries to read/write the column.
 	Enum []string `gorm:"-" json:"enum,omitempty"`
+
+	// SecretConfigured is populated by the service layer (NOT persisted)
+	// for IsSecret rows: true when the stored value (or ENV fallback) is
+	// non-empty, so the UI can distinguish "configured but masked" from
+	// "not configured yet" without ever seeing the value.
+	SecretConfigured bool `gorm:"-" json:"secret_configured,omitempty"`
 
 	// LastModifiedByName is a display label resolved from LastModifiedBy
 	// (the user's UUID) at handler time — username when available,
