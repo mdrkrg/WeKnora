@@ -383,8 +383,10 @@ export interface SystemSettingItem {
   value_type: 'int' | 'string' | 'bool' | 'string_list'
   category: string
   description: string
-  /** P3+ — currently always false. UI may surface a "redacted" state when true. */
+  /** Service masks the value of secret rows; UI may surface a "redacted" state when true. */
   is_secret: boolean
+  /** True for IsSecret rows that carry a non-empty stored value (or ENV fallback). */
+  secret_configured?: boolean
   /** P3+ — currently always false. UI may show "needs restart to take effect" badge when true. */
   requires_restart: boolean
   last_modified_by: string

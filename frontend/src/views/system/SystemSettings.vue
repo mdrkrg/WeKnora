@@ -311,6 +311,17 @@
             </div>
           </t-popconfirm>
           <t-input
+            v-else-if="item.is_secret"
+            v-model="editValues[item.key]"
+            type="password"
+            autocomplete="new-password"
+            :placeholder="secretPlaceholder(item)"
+            :aria-label="keyLabel(item.key)"
+            :disabled="savingKey === item.key"
+            class="setting-input"
+            @blur="onChange(item)"
+          />
+          <t-input
             v-else
             v-model="editValues[item.key]"
             :placeholder="placeholderFor(item)"
@@ -896,6 +907,15 @@ function placeholderFor(item: SystemSettingItem): string {
   if (v === null || v === undefined) return ''
   if (Array.isArray(v)) return v.join(', ')
   return String(v)
+}
+
+// Secret rows arrive with a masked (empty) value; the placeholder tells the
+// operator whether a value exists without ever revealing it, and that leaving
+// the field blank preserves the current secret.
+function secretPlaceholder(item: SystemSettingItem): string {
+  return item.secret_configured
+    ? t('system.globalSettings.secretPlaceholderConfigured')
+    : t('system.globalSettings.secretPlaceholderEmpty')
 }
 
 function minimumFor(item: SystemSettingItem): number {

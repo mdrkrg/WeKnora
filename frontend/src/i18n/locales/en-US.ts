@@ -3151,6 +3151,8 @@ export default {
       badgeHighRisk: 'High risk',
       badgeOverride: 'Overridden',
       badgeOverrideTooltip: 'This value has been saved to the database by an administrator, overriding the environment variable and built-in default.',
+      secretPlaceholderConfigured: '•••••••• (leave blank to keep current value)',
+      secretPlaceholderEmpty: 'Not configured yet',
       modifiedAt: 'Last modified: {value}',
       tagInputPlaceholder: 'Press Enter to add an entry, e.g. example.com / *.foo.com / 10.0.0.0/8',
       priorityHint: {

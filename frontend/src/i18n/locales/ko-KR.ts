@@ -2593,6 +2593,8 @@ export default {
       badgeHighRisk: '고위험',
       badgeOverride: '재정의됨',
       badgeOverrideTooltip: '이 값은 관리자가 DB에 저장하여 환경 변수 및 기본값을 덮어썼습니다.',
+      secretPlaceholderConfigured: '•••••••• (비워두면 현재 값 유지)',
+      secretPlaceholderEmpty: '아직 구성되지 않음',
       modifiedAt: '마지막 수정: {value}',
       tagInputPlaceholder: '엔터로 항목 추가. 예: example.com / *.foo.com / 10.0.0.0/8',
       audit: {

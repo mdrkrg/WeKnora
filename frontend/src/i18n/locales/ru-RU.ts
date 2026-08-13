@@ -2593,6 +2593,8 @@ export default {
       badgeHighRisk: 'Высокий риск',
       badgeOverride: 'Переопределено',
       badgeOverrideTooltip: 'Это значение сохранено администратором в БД и переопределяет переменную окружения и значение по умолчанию.',
+      secretPlaceholderConfigured: '•••••••• (оставьте пустым, чтобы сохранить текущее значение)',
+      secretPlaceholderEmpty: 'Ещё не настроено',
       modifiedAt: 'Последнее изменение: {value}',
       tagInputPlaceholder: 'Нажмите Enter, чтобы добавить запись, например: example.com / *.foo.com / 10.0.0.0/8',
       audit: {

@@ -2595,6 +2595,8 @@ export default {
       badgeHighRisk: '高风险',
       badgeOverride: '已覆盖',
       badgeOverrideTooltip: '该值已由管理员保存到数据库，覆盖了环境变量与默认值',
+      secretPlaceholderConfigured: '••••••••（留空保持不变）',
+      secretPlaceholderEmpty: '尚未配置',
       modifiedAt: '上次修改：{value}',
       tagInputPlaceholder: '回车添加条目，例：example.com / *.foo.com / 10.0.0.0/8',
       audit: {
