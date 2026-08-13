@@ -19,6 +19,7 @@ import {
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import { getDatasourceIconUrl } from './datasourceIcons'
+import { deleteTemporaryDataSourceDraft } from './dataSourceDraftLifecycle'
 
 const props = defineProps<{
   kbId: string
@@ -26,7 +27,7 @@ const props = defineProps<{
 }>()
 
 const visible = defineModel<boolean>('visible', { default: false })
-const emit = defineEmits<{ saved: [] }>()
+const emit = defineEmits<{ saved: []; discarded: [] }>()
 const { t } = useI18n()
 
 const isEdit = computed(() => !!props.dataSource)
@@ -641,13 +642,20 @@ const currentDef = computed(() => connectorDefs.value.find(d => d.type === form.
 // --- Drawer lifecycle ---
 watch(visible, async (v) => {
   if (!v) {
-    if (!isEdit.value && tempDsId.value) {
-      try {
-        await deleteDataSource(tempDsId.value)
-      } catch {
-        // Ignore cleanup errors
-      }
+    // Abandoned create drafts (temp row created early for resource listing)
+    // are deleted here; `discarded` lets DataSourceSettings refresh the list.
+    let removedId = ''
+    try {
+      removedId = await deleteTemporaryDataSourceDraft(
+        { isEdit: isEdit.value, tempDsId: tempDsId.value, isCommitted: false },
+        deleteDataSource,
+      )
+    } catch {
+      // Ignore cleanup errors
+    }
+    if (removedId) {
       tempDsId.value = ''
+      emit('discarded')
     }
     return
   }

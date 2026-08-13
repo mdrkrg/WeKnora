@@ -6,10 +6,9 @@ import {
   shouldDeleteTemporaryDataSource,
 } from './dataSourceDraftLifecycle.ts'
 
-// Characterization tests for the current drawer lifecycle. The first case is
-// the "configuration disappears" candidate: a data source row created early
-// (e.g. paused for resource listing) must be cleaned up when a new drawer is
-// closed before final submit.
+// Characterization tests for the current drawer lifecycle: a data source row
+// created early (e.g. for resource listing) must be cleaned up when a new
+// drawer closes before final submit.
 test('new drawer with an unsaved temporary data source triggers cleanup', () => {
   assert.equal(
     shouldDeleteTemporaryDataSource({ isEdit: false, tempDsId: 'ds-temp', isCommitted: false }),
@@ -22,6 +21,10 @@ test('final submit clears temp id before close, so cleanup is skipped', () => {
     shouldDeleteTemporaryDataSource({ isEdit: false, tempDsId: '', isCommitted: true }),
     false,
   )
+  assert.equal(
+    shouldDeleteTemporaryDataSource({ isEdit: false, tempDsId: 'ds-saved', isCommitted: true }),
+    false,
+  )
 })
 
 test('closing an edit drawer never cleans up the existing data source', () => {
@@ -29,11 +32,8 @@ test('closing an edit drawer never cleans up the existing data source', () => {
     shouldDeleteTemporaryDataSource({ isEdit: true, tempDsId: 'ds-existing', isCommitted: false }),
     false,
   )
-})
-
-test('a committed temporary id is never deleted during close', () => {
   assert.equal(
-    shouldDeleteTemporaryDataSource({ isEdit: false, tempDsId: 'ds-saved', isCommitted: true }),
+    shouldDeleteTemporaryDataSource({ isEdit: true, tempDsId: 'ds-existing', isCommitted: true }),
     false,
   )
 })
