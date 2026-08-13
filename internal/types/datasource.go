@@ -1,6 +1,7 @@
 package types
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"strings"
@@ -235,6 +236,19 @@ type DataSourceConfig struct {
 	// ingesting an image into a KB without VLM is rejected, so image extraction is
 	// skipped when this is false.
 	MultimodalEnabled bool `json:"-"`
+
+	// OnCredentialsUpdated is an optional runtime hook (not persisted) invoked
+	// when a connector refreshes OAuth tokens and needs them written back to
+	// the data source row. The service wires it during config loading; plain
+	// (non-OAuth) connectors never see it set.
+	OnCredentialsUpdated func(ctx context.Context, credentials map[string]interface{}) error `json:"-"`
+
+	// OnCredentialsReload returns the latest persisted credentials after a
+	// connector acquires a cross-process refresh lock. It lets a waiting app
+	// replica reuse tokens already rotated by the lock holder instead of
+	// submitting the now-invalid old refresh token again. Single-process
+	// deployments leave this nil and rely on local coordination.
+	OnCredentialsReload func(ctx context.Context) (map[string]interface{}, error) `json:"-"`
 }
 
 // HasCredentials reports whether the credentials map carries any value at

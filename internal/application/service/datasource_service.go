@@ -319,6 +319,95 @@ func (s *DataSourceService) ClearDataSourceCredentials(ctx context.Context, id s
 	return nil
 }
 
+// MergeDataSourceCredentials patches credential keys onto the existing map.
+// Empty-string values delete the key. Does not run live connector validation
+// (used by OAuth token write-back / refresh).
+func (s *DataSourceService) MergeDataSourceCredentials(
+	ctx context.Context, id string, patch map[string]interface{},
+) error {
+	if id == "" {
+		return datasource.ErrDataSourceInvalid
+	}
+	existing, err := s.dsRepo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	parsed, err := existing.ParseConfig()
+	if err != nil {
+		return err
+	}
+	if parsed == nil {
+		parsed = &types.DataSourceConfig{Type: existing.Type}
+	}
+	if parsed.Credentials == nil {
+		parsed.Credentials = map[string]interface{}{}
+	}
+	for k, v := range patch {
+		if s, ok := v.(string); ok && s == "" {
+			delete(parsed.Credentials, k)
+			continue
+		}
+		parsed.Credentials[k] = v
+	}
+	parsed.StripNonSecretCredentials(existing.Type)
+	blob, err := parsed.ToJSON()
+	if err != nil {
+		return err
+	}
+	existing.Config = blob
+	if err := s.dsRepo.Update(ctx, existing); err != nil {
+		return err
+	}
+	logger.Infof(ctx, "DataSource credentials merged: id=%s", secutils.SanitizeForLog(id))
+	return nil
+}
+
+// attachCredentialPersister wires OAuth token write-back hooks for connectors
+// that refresh tokens during API calls. The hooks are runtime-only: they are
+// never persisted and leave the in-memory config untouched on failure.
+func (s *DataSourceService) attachCredentialPersister(dsID string, config *types.DataSourceConfig) {
+	if config == nil || dsID == "" {
+		return
+	}
+	config.OnCredentialsUpdated = func(ctx context.Context, credentials map[string]interface{}) error {
+		return s.MergeDataSourceCredentials(ctx, dsID, credentials)
+	}
+	config.OnCredentialsReload = func(ctx context.Context) (map[string]interface{}, error) {
+		existing, err := s.dsRepo.FindByID(ctx, dsID)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := existing.ParseConfig()
+		if err != nil {
+			return nil, err
+		}
+		if parsed == nil || parsed.Credentials == nil {
+			return map[string]interface{}{}, nil
+		}
+		credentials := make(map[string]interface{}, len(parsed.Credentials))
+		for key, value := range parsed.Credentials {
+			credentials[key] = value
+		}
+		return credentials, nil
+	}
+}
+
+// loadConnectorConfig parses a data source's persisted configuration and
+// attaches the runtime pieces connectors may need: the OAuth credential
+// write-back hooks used when a connector refreshes tokens mid-call. Connectors
+// without OAuth simply never invoke the hooks.
+func (s *DataSourceService) loadConnectorConfig(ctx context.Context, ds *types.DataSource) (*types.DataSourceConfig, error) {
+	config, err := ds.ParseConfig()
+	if err != nil {
+		return nil, datasource.ErrInvalidConfig
+	}
+	if config == nil {
+		config = &types.DataSourceConfig{Type: ds.Type}
+	}
+	s.attachCredentialPersister(ds.ID, config)
+	return config, nil
+}
+
 // DeleteDataSource deletes a data source (soft delete)
 func (s *DataSourceService) DeleteDataSource(ctx context.Context, id string) error {
 	// Verify data source exists
@@ -361,7 +450,7 @@ func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string)
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
@@ -403,7 +492,7 @@ func (s *DataSourceService) ListAvailableResources(
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
@@ -437,7 +526,7 @@ func (s *DataSourceService) ResolveResourceAncestors(
 		return nil, err
 	}
 
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
@@ -646,7 +735,7 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	}
 
 	// Parse configuration
-	config, err := ds.ParseConfig()
+	config, err := s.loadConnectorConfig(ctx, ds)
 	if err != nil {
 		logger.Errorf(ctx, "failed to parse config: %v", err)
 		syncLog.Status = types.SyncLogStatusFailed

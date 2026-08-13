@@ -36,6 +36,12 @@ type DataSourceService interface {
 	// Idempotent on already-empty credentials.
 	ClearDataSourceCredentials(ctx context.Context, id string) error
 
+	// MergeDataSourceCredentials patches individual credential keys onto the
+	// existing map without wiping unrelated keys. Empty-string values delete
+	// the key. Used by OAuth token persistence and refresh write-backs; does
+	// not run live connector validation.
+	MergeDataSourceCredentials(ctx context.Context, id string, patch map[string]interface{}) error
+
 	// ValidateConnection tests the connection to an external data source
 	ValidateConnection(ctx context.Context, dsID string) error
 
