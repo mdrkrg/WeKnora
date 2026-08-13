@@ -15,6 +15,7 @@ import DataSourceEditorDialog from './DataSourceEditorDialog.vue'
 import DataSourceSyncLogs from './DataSourceSyncLogs.vue'
 import DataSourceTypeIcon from './DataSourceTypeIcon.vue'
 import type { DataSourceSyncStartedEvent } from './dataSourceSyncMonitor'
+import { dataSourceErrorMessage, isAuthorizationError } from './dataSourceResourceErrors'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ kbId: string }>()
@@ -97,7 +98,7 @@ async function removeDataSource(ds: DataSource) {
     MessagePlugin.success(t('datasource.deleteSuccess'))
     await loadList()
   } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.deleteFailed'))
+    MessagePlugin.error(dataSourceErrorMessage(e) || t('datasource.deleteFailed'))
   }
 }
 
@@ -115,7 +116,10 @@ async function handleSync(ds: DataSource) {
     MessagePlugin.success(t('datasource.syncTriggered'))
     await loadList(true)
   } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.syncFailed'))
+    const fallback = isAuthorizationError(ds.type, e)
+      ? t('datasource.authErrorHint')
+      : t('datasource.syncFailed')
+    MessagePlugin.error(dataSourceErrorMessage(e) || fallback)
   }
 }
 
@@ -125,7 +129,7 @@ async function handlePause(ds: DataSource) {
     MessagePlugin.success(t('datasource.paused'))
     loadList()
   } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.pauseFailed'))
+    MessagePlugin.error(dataSourceErrorMessage(e) || t('datasource.pauseFailed'))
   }
 }
 
@@ -135,7 +139,7 @@ async function handleResume(ds: DataSource) {
     MessagePlugin.success(t('datasource.resumed'))
     loadList()
   } catch (e: any) {
-    MessagePlugin.error(e?.message || e?.error || t('datasource.resumeFailed'))
+    MessagePlugin.error(dataSourceErrorMessage(e) || t('datasource.resumeFailed'))
   }
 }
 

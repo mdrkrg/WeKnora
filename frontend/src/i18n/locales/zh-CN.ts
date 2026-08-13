@@ -564,6 +564,7 @@ export default {
     syncNow: '立即同步',
     syncTriggered: '同步任务已提交',
     syncFailed: '同步触发失败',
+    authErrorHint: '授权已过期或失效，请在数据源设置中重新授权后重试',
     pause: '暂停',
     resume: '恢复',
     paused: '已暂停',

@@ -564,6 +564,7 @@ export default {
     syncNow: '지금 동기화',
     syncTriggered: '동기화 작업이 제출되었습니다',
     syncFailed: '동기화 트리거 실패',
+    authErrorHint: '권한이 만료되었거나 취소되었습니다. 데이터 소스를 다시 인증한 후 재시도하세요',
     pause: '일시정지',
     resume: '재개',
     paused: '일시정지됨',

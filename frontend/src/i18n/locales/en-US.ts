@@ -5389,6 +5389,7 @@ export default {
     syncNow: 'Sync Now',
     syncTriggered: 'Sync task submitted',
     syncFailed: 'Failed to trigger sync',
+    authErrorHint: 'Authorization has expired or been revoked. Re-authorize the data source and try again',
     pause: 'Pause',
     resume: 'Resume',
     paused: 'Paused',
