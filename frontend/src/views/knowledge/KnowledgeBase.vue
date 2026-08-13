@@ -16,7 +16,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 import KnowledgeBaseEditorModal from './KnowledgeBaseEditorModal.vue';
-import { getDataSource } from '@/api/datasource';
+import { getSyncLogs } from '@/api/datasource';
 import {
   monitorDataSourceSync,
   type DataSourceSyncStartedEvent,
@@ -2259,8 +2259,11 @@ const handleDataSourceSyncStarted = (event: DataSourceSyncStartedEvent) => {
     targetSyncLogId: event.syncLogId,
     signal: controller.signal,
     fetchDataSource: async () => {
-      const response: any = await getDataSource(event.dataSourceId);
-      return response?.data || response || {};
+      // GET /datasource/{id} does not carry latest_sync_log; poll the sync
+      // logs endpoint so the monitor can observe the target log settling.
+      const response: any = await getSyncLogs(event.dataSourceId, 1, 0);
+      const logs = response?.data || response || [];
+      return { latest_sync_log: logs[0] ?? null };
     },
     refreshKnowledge: async () => {
       if (!controller.signal.aborted && event.kbId === kbId.value) {
