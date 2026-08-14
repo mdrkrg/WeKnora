@@ -65,6 +65,7 @@ type knowledgeService struct {
 	storageResolver interfaces.StorageBackendResolver
 	resourceCatalog interfaces.ResourceCatalog
 	modelService    interfaces.ModelService
+	modelPolicy     interfaces.ModelPolicyService
 	task            interfaces.TaskEnqueuer
 	taskInspector   interfaces.TaskInspector
 	graphEngine     interfaces.RetrieveGraphRepository
@@ -110,6 +111,7 @@ func NewKnowledgeService(
 	storageResolver interfaces.StorageBackendResolver,
 	resourceCatalog interfaces.ResourceCatalog,
 	modelService interfaces.ModelService,
+	modelPolicy interfaces.ModelPolicyService,
 	task interfaces.TaskEnqueuer,
 	taskInspector interfaces.TaskInspector,
 	graphEngine interfaces.RetrieveGraphRepository,
@@ -140,6 +142,7 @@ func NewKnowledgeService(
 		storageResolver: storageResolver,
 		resourceCatalog: resourceCatalog,
 		modelService:    modelService,
+		modelPolicy:     modelPolicy,
 		task:            task,
 		taskInspector:   taskInspector,
 		graphEngine:     graphEngine,

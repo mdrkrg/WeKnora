@@ -30,6 +30,7 @@ type modelService struct {
 	ollamaService *ollama.OllamaService
 	pooler        embedding.EmbedderPooler
 	tenantService interfaces.TenantService
+	policy        interfaces.ModelPolicyService
 }
 
 // NewModelService creates a new model service instance
@@ -39,6 +40,7 @@ func NewModelService(repo interfaces.ModelRepository,
 	ollamaService *ollama.OllamaService,
 	pooler embedding.EmbedderPooler,
 	tenantService interfaces.TenantService,
+	policy interfaces.ModelPolicyService,
 ) interfaces.ModelService {
 	return &modelService{
 		repo:          repo,
@@ -47,6 +49,7 @@ func NewModelService(repo interfaces.ModelRepository,
 		ollamaService: ollamaService,
 		pooler:        pooler,
 		tenantService: tenantService,
+		policy:        policy,
 	}
 }
 
@@ -97,6 +100,16 @@ func (s *modelService) resolveWeKnoraCloudCredentials(ctx context.Context, param
 // Remote models are immediately set to active status
 func (s *modelService) CreateModel(ctx context.Context, model *types.Model) error {
 	logger.Infof(ctx, "Creating model: %s, type: %s, source: %s", model.Name, model.Type, model.Source)
+	if s.policy != nil {
+		if err := s.policy.ValidateModelForWrite(ctx, model); err != nil {
+			return err
+		}
+	}
+	if model.Parameters.BaseURL != "" {
+		if err := utils.ValidateURLForSSRF(model.Parameters.BaseURL); err != nil {
+			return apperrors.NewBadRequestError(utils.FormatSSRFError("Base URL", model.Parameters.BaseURL, err))
+		}
+	}
 
 	// Handle remote models (e.g., OpenAI, Azure)
 	if model.Source == types.ModelSourceRemote {
@@ -219,6 +232,9 @@ func (s *modelService) ListModels(ctx context.Context) ([]*types.Model, error) {
 	}
 
 	logger.Infof(ctx, "Retrieved %d models successfully", len(models))
+	if s.policy != nil {
+		models = s.policy.FilterModelsForCaller(ctx, models)
+	}
 	return models, nil
 }
 
@@ -247,6 +263,16 @@ func (s *modelService) UpdateModel(ctx context.Context, model *types.Model) erro
 		model.TenantID = existingModel.TenantID
 		model.IsBuiltin = true
 		model.ManagedBy = ""
+	}
+	if s.policy != nil {
+		if err := s.policy.ValidateModelForWrite(ctx, model); err != nil {
+			return err
+		}
+	}
+	if model.Parameters.BaseURL != "" {
+		if err := utils.ValidateURLForSSRF(model.Parameters.BaseURL); err != nil {
+			return apperrors.NewBadRequestError(utils.FormatSSRFError("Base URL", model.Parameters.BaseURL, err))
+		}
 	}
 
 	// Update model in repository
@@ -418,6 +444,12 @@ func (s *modelService) GetEmbeddingModel(ctx context.Context, modelId string) (e
 		})
 		return nil, err
 	}
+	if s.policy != nil {
+		model, err = s.policy.PrepareModelForRuntime(ctx, model)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	logger.Infof(ctx, "Getting embedding model: %s, source: %s", model.Name, model.Source)
 
@@ -465,6 +497,12 @@ func (s *modelService) GetEmbeddingModelForTenant(ctx context.Context, modelId s
 		logger.Errorf(ctx, "Model is not active, status: %s", model.Status)
 		return nil, errors.New("model is not active")
 	}
+	if s.policy != nil {
+		model, err = s.policy.PrepareModelForRuntime(ctx, model)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	logger.Infof(ctx, "Getting cross-tenant embedding model: %s, source: %s, tenant: %d", model.Name, model.Source, tenantID)
 
@@ -494,6 +532,12 @@ func (s *modelService) GetRerankModel(ctx context.Context, modelId string) (rera
 			"model_id": modelId,
 		})
 		return nil, err
+	}
+	if s.policy != nil {
+		model, err = s.policy.PrepareModelForRuntime(ctx, model)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	logger.Infof(ctx, "Getting rerank model: %s, source: %s", model.Name, model.Source)
@@ -538,6 +582,12 @@ func (s *modelService) GetChatModel(ctx context.Context, modelId string) (chat.C
 		logger.Error(ctx, "Chat model not found")
 		return nil, ErrModelNotFound
 	}
+	if s.policy != nil {
+		model, err = s.policy.PrepareModelForRuntime(ctx, model)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	logger.Infof(ctx, "Getting chat model: %s, source: %s", model.Name, model.Source)
 
@@ -574,6 +624,12 @@ func (s *modelService) GetVLMModel(ctx context.Context, modelId string) (vlm.VLM
 
 	if model == nil {
 		return nil, ErrModelNotFound
+	}
+	if s.policy != nil {
+		model, err = s.policy.PrepareModelForRuntime(ctx, model)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	logger.Infof(ctx, "Getting VLM model: %s, source: %s", model.Name, model.Source)
@@ -614,6 +670,12 @@ func (s *modelService) GetASRModel(ctx context.Context, modelId string) (asr.ASR
 
 	if model == nil {
 		return nil, ErrModelNotFound
+	}
+	if s.policy != nil {
+		model, err = s.policy.PrepareModelForRuntime(ctx, model)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	logger.Infof(ctx, "Getting ASR model: %s, source: %s", model.Name, model.Source)

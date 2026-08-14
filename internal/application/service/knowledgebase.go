@@ -35,6 +35,7 @@ type knowledgeBaseService struct {
 	shareRepo       interfaces.KBShareRepository
 	kbShareService  interfaces.KBShareService
 	modelService    interfaces.ModelService
+	modelPolicy     interfaces.ModelPolicyService
 	retrieveEngine  interfaces.RetrieveEngineRegistry
 	ownership       retriever.TenantStoreOwnership
 	tenantRepo      interfaces.TenantRepository
@@ -57,6 +58,7 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 	shareRepo interfaces.KBShareRepository,
 	kbShareService interfaces.KBShareService,
 	modelService interfaces.ModelService,
+	modelPolicy interfaces.ModelPolicyService,
 	retrieveEngine interfaces.RetrieveEngineRegistry,
 	ownership retriever.TenantStoreOwnership,
 	tenantRepo interfaces.TenantRepository,
@@ -78,6 +80,7 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 		shareRepo:       shareRepo,
 		kbShareService:  kbShareService,
 		modelService:    modelService,
+		modelPolicy:     modelPolicy,
 		retrieveEngine:  retrieveEngine,
 		ownership:       ownership,
 		tenantRepo:      tenantRepo,
@@ -149,6 +152,14 @@ func (s *knowledgeBaseService) CreateKnowledgeBase(ctx context.Context,
 
 	if kb.HasVectorStore() {
 		if err := s.validateVectorStoreBinding(ctx, kb.TenantID, *kb.VectorStoreID); err != nil {
+			return nil, err
+		}
+	}
+	if s.modelPolicy != nil {
+		// Creation path: manifest default parser rules apply; update paths
+		// must not converge pre-existing KBs to the deployment defaults.
+		ctx = types.WithKnowledgeBaseCreationDefaults(ctx)
+		if err := s.modelPolicy.ApplyKnowledgeBasePolicy(ctx, kb); err != nil {
 			return nil, err
 		}
 	}
@@ -554,6 +565,11 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 	}
 	kb.UpdatedAt = time.Now()
 	kb.EnsureDefaults()
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ApplyKnowledgeBasePolicy(ctx, kb); err != nil {
+			return nil, err
+		}
+	}
 
 	logger.Info(ctx, "Saving knowledge base update")
 	if err := s.repo.UpdateKnowledgeBase(ctx, kb); err != nil {
@@ -1194,6 +1210,11 @@ func (s *knowledgeBaseService) CopyKnowledgeBase(ctx context.Context,
 			targetKB.CreatorID = uid
 		}
 		targetKB.EnsureDefaults()
+		if s.modelPolicy != nil {
+			if err := s.modelPolicy.ApplyKnowledgeBasePolicy(ctx, targetKB); err != nil {
+				return nil, nil, err
+			}
+		}
 		if err := s.repo.CreateKnowledgeBase(ctx, targetKB); err != nil {
 			return nil, nil, err
 		}
@@ -1251,6 +1272,11 @@ func (s *knowledgeBaseService) DuplicateKnowledgeBase(
 
 	if targetKB.HasVectorStore() {
 		if err := s.validateVectorStoreBinding(ctx, tenantID, *targetKB.VectorStoreID); err != nil {
+			return nil, err
+		}
+	}
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ApplyKnowledgeBasePolicy(ctx, targetKB); err != nil {
 			return nil, err
 		}
 	}

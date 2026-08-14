@@ -204,8 +204,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	user, err := h.userService.Register(ctx, &req)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to register user: %v", err)
-		appErr := errors.NewBadRequestError(err.Error())
-		c.Error(appErr)
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		c.Error(errors.NewBadRequestError(err.Error()))
 		return
 	}
 
@@ -842,8 +845,11 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 		})
 		if err != nil {
 			logger.Errorf(ctx, "Auto-setup: failed to register default user: %v", err)
-			appErr := errors.NewInternalServerError("auto-setup failed").WithDetails(err.Error())
-			c.Error(appErr)
+			if appErr, ok := errors.IsAppError(err); ok {
+				c.Error(appErr)
+				return
+			}
+			c.Error(errors.NewInternalServerError("auto-setup failed").WithDetails(err.Error()))
 			return
 		}
 		user, _ = h.userService.GetUserByEmail(ctx, defaultEmail)

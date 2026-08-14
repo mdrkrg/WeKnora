@@ -36,6 +36,7 @@ type TenantHandler struct {
 	// in-code default, so a SystemAdmin's UI override applies on the
 	// very next CreateTenant call.
 	systemSettingSvc interfaces.SystemSettingService
+	modelPolicy     interfaces.ModelPolicyService
 }
 
 // NewTenantHandler creates a new tenant handler instance with the provided service
@@ -63,6 +64,7 @@ func NewTenantHandler(
 	kbService interfaces.KnowledgeBaseService,
 	config *config.Config,
 	systemSettingSvc interfaces.SystemSettingService,
+	modelPolicy interfaces.ModelPolicyService,
 ) *TenantHandler {
 	return &TenantHandler{
 		service:          service,
@@ -72,6 +74,7 @@ func NewTenantHandler(
 		kbService:        kbService,
 		config:           config,
 		systemSettingSvc: systemSettingSvc,
+		modelPolicy:      modelPolicy,
 	}
 }
 
@@ -1424,6 +1427,12 @@ func (h *TenantHandler) updateTenantParserEngineConfigInternal(c *gin.Context) {
 	if err := validateParserEngineOutboundURLs(merged); err != nil {
 		c.Error(errors.NewValidationError(err.Error()))
 		return
+	}
+	if h.modelPolicy != nil {
+		if err := h.modelPolicy.ValidateTenantParserConfig(ctx, merged); err != nil {
+			c.Error(err)
+			return
+		}
 	}
 	tenant.ParserEngineConfig = merged
 	updatedTenant, err := h.service.UpdateTenant(ctx, tenant)

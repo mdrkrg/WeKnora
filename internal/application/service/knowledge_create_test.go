@@ -312,6 +312,53 @@ func TestCreateKnowledgeFromFile_PersistsProcessOverrides(t *testing.T) {
 	require.Equal(t, "test", metadataMap["source"])
 }
 
+func TestCreateKnowledgeFromFileRejectsLockedParserOverrideBeforeStorage(t *testing.T) {
+	t.Parallel()
+
+	profile := types.ParserProfile{
+		ID:        "school-mineru",
+		Engine:    "mineru",
+		FileTypes: []string{"pdf"},
+	}
+	settings := newPolicySettingsStub(map[string]any{
+		settingModelPolicyMode:    "enforce",
+		settingProviderCatalog:    "[]",
+		settingFixedParserProfile: parserProfileJSON(t, profile),
+	})
+	modelPolicy := NewModelPolicyService(
+		&policyModelRepoStub{models: map[string]*types.Model{}},
+		settings,
+	)
+	repo := &createKnowledgeFileRepoStub{}
+	fileSvc := &createKnowledgeFileServiceStub{}
+	svc := &knowledgeService{
+		repo:        repo,
+		kbService:   &createKnowledgeFileKBServiceStub{kb: &types.KnowledgeBase{ID: "kb-1"}},
+		fileSvc:     fileSvc,
+		modelPolicy: modelPolicy,
+	}
+	overrides := &types.KnowledgeProcessOverrides{
+		ParserEngineRules: []types.ParserEngineRule{{FileTypes: []string{"pdf"}, Engine: "builtin"}},
+	}
+
+	knowledge, err := svc.CreateKnowledgeFromFile(
+		newCreateKnowledgeFileContext(),
+		"kb-1",
+		newMultipartFileHeader(t, "doc.pdf", "not-a-real-pdf"),
+		nil,
+		nil,
+		"",
+		nil,
+		"",
+		overrides,
+	)
+
+	require.ErrorContains(t, err, "fixed to mineru")
+	require.Nil(t, knowledge)
+	require.Zero(t, fileSvc.saveCalls)
+	require.Zero(t, repo.createCalls)
+}
+
 func newCreateKnowledgeFileContext() context.Context {
 	ctx := context.WithValue(context.Background(), types.TenantIDContextKey, uint64(1))
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, &types.Tenant{})

@@ -26,6 +26,7 @@ type KnowledgePostProcessService struct {
 	pendingRepo   interfaces.TaskPendingOpsRepository
 	redisClient   *redis.Client
 	spanTracker   SpanTracker
+	modelPolicy   interfaces.ModelPolicyService
 }
 
 func NewKnowledgePostProcessService(
@@ -36,6 +37,7 @@ func NewKnowledgePostProcessService(
 	pendingRepo interfaces.TaskPendingOpsRepository,
 	redisClient *redis.Client,
 	spanTracker SpanTracker,
+	modelPolicy interfaces.ModelPolicyService,
 ) interfaces.TaskHandler {
 	return &KnowledgePostProcessService{
 		knowledgeRepo: knowledgeRepo,
@@ -45,6 +47,7 @@ func NewKnowledgePostProcessService(
 		pendingRepo:   pendingRepo,
 		redisClient:   redisClient,
 		spanTracker:   spanTracker,
+		modelPolicy:   modelPolicy,
 	}
 }
 
@@ -143,6 +146,11 @@ func (s *KnowledgePostProcessService) Handle(ctx context.Context, task *asynq.Ta
 
 	processOverrides, _ := knowledge.ProcessOverrides()
 	eff := ResolveProcessConfig(kb, processOverrides)
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ApplyEffectiveProcessPolicy(ctx, &eff); err != nil {
+			return err
+		}
+	}
 
 	// 2. Fetch all chunks
 	chunks, err := s.chunkService.ListChunksByKnowledgeID(ctx, payload.KnowledgeID)

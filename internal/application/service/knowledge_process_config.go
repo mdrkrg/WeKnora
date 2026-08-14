@@ -213,6 +213,24 @@ func ApplyKnowledgeProcessOverrides(
 	return eff, nil
 }
 
+func (s *knowledgeService) applyKnowledgeProcessOverrides(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	processOverrides *types.KnowledgeProcessOverrides,
+	fileTypes []string,
+	enableMultimodel *bool,
+) (types.EffectiveProcessConfig, error) {
+	if s.modelPolicy != nil {
+		if err := s.modelPolicy.ValidateProcessOverrides(ctx, kb, processOverrides, fileTypes); err != nil {
+			return ResolveProcessConfig(kb, processOverrides), err
+		}
+	}
+	return ApplyKnowledgeProcessOverrides(
+		ctx, kb, knowledge, processOverrides, fileTypes, enableMultimodel,
+	)
+}
+
 // reparseFileTypes derives the file types used to validate overrides on reparse.
 // Manual knowledge has no file; URL imports validate as html.
 func reparseFileTypes(k *types.Knowledge) []string {

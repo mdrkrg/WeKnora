@@ -92,6 +92,9 @@ type settingSpec struct {
 	// (e.g. asynq worker pool size). The UI shows a restart badge; the
 	// service persists the flag on first write.
 	RequiresRestart bool
+	// Hidden omits internal settings from the generic System Settings list.
+	// Dedicated management APIs still use the same validated registry entry.
+	Hidden bool
 }
 
 // registry pins the set of legal keys. Expanding it is a deliberate,
@@ -270,6 +273,63 @@ var registry = map[string]settingSpec{
 		Description: "后台任务（文档入库/富化）对单个模型的默认并发上限，按模型 ID 全副本共享。" +
 			"每次调用实时读取，修改后立即生效、无需重启。0 或负数表示关闭默认限制" +
 			"（各模型仍会尊重自身在模型管理里配置的上限）。仅影响后台任务，不影响交互式对话。",
+	},
+	"model.policy_mode": {
+		Type:        "string",
+		Default:     "off",
+		Enum:        []string{"off", "audit", "enforce"},
+		Category:    "model_policy",
+		Description: "平台模型策略模式。off 保持上游兼容；audit 记录违规；enforce 拒绝未批准 Provider 和被覆盖的固定文档处理配置。",
+		Hidden:      true,
+	},
+	"model.require_explicit_provider": {
+		Type:        "bool",
+		Default:     true,
+		Category:    "model_policy",
+		Description: "是否要求远程 Model 显式引用平台 Provider ID，禁止仅依靠 Base URL 自动推断。",
+		Hidden:      true,
+	},
+	"model.provider_catalog": {
+		Type:        "string",
+		Default:     "[]",
+		Category:    "model_policy",
+		Description: "平台 Provider 连接定义，由专用 SystemAdmin Provider API 管理。",
+		Hidden:      true,
+	},
+	"model.fixed_ingest_embedding_id": {
+		Type:        "string",
+		Default:     "",
+		Category:    "model_policy",
+		Description: "文档入库固定使用的 Embedding Model ID；留空表示不固定。",
+		Hidden:      true,
+	},
+	"model.fixed_ingest_summary_id": {
+		Type:        "string",
+		Default:     "",
+		Category:    "model_policy",
+		Description: "文档摘要、问题生成和图谱抽取固定使用的 KnowledgeQA Model ID；交互聊天不受影响。",
+		Hidden:      true,
+	},
+	"model.fixed_ingest_vlm_id": {
+		Type:        "string",
+		Default:     "",
+		Category:    "model_policy",
+		Description: "文档图片处理固定使用的 VLM Model ID；留空表示不固定。",
+		Hidden:      true,
+	},
+	"model.fixed_ingest_asr_id": {
+		Type:        "string",
+		Default:     "",
+		Category:    "model_policy",
+		Description: "文档音频处理固定使用的 ASR Model ID；留空表示不固定。",
+		Hidden:      true,
+	},
+	"parser.fixed_profile": {
+		Type:        "string",
+		Default:     "",
+		Category:    "model_policy",
+		Description: "平台固定 Parser profile 的 JSON；密钥必须写成 ${ENV_VAR} 引用，不能保存明文。",
+		Hidden:      true,
 	},
 }
 
@@ -725,6 +785,10 @@ func (s *systemSettingService) List(ctx context.Context) ([]*types.SystemSetting
 
 	for _, key := range keys {
 		spec := registry[key]
+		if spec.Hidden {
+			delete(byKey, key)
+			continue
+		}
 		if row := byKey[key]; row != nil {
 			row.Enum = spec.Enum
 			if isBootstrapDefaultRow(row, spec) {

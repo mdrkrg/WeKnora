@@ -185,7 +185,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 
 	// Business service layer
 	logger.Debugf(ctx, "[Container] Registering business services...")
-	must(container.Provide(service.NewTenantService))
+	must(container.Provide(service.NewTenantServiceWithWorkspaceProvisioning))
 	must(container.Provide(service.NewTenantAPIKeyService))
 	must(container.Provide(service.NewTenantMemberService))
 	must(container.Provide(service.NewTenantInvitationService))
@@ -205,6 +205,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewEvaluationService))
 	must(container.Provide(service.NewUserService))
 	must(container.Provide(service.NewSystemSettingService))
+	must(container.Provide(loadWorkspaceProvisioningConfig))
+	must(container.Provide(service.NewModelPolicyServiceWithWorkspaceProvisioning))
+	must(container.Invoke(initializeWorkspaceProvisioning))
 	must(container.Provide(service.NewWeKnoraCloudService))
 
 	// Extract services - register individual extracters with names
@@ -218,7 +221,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewMessageSuggestionService))
 	must(container.Provide(service.NewMCPServiceService))
 	must(container.Provide(service.NewMCPToolApprovalService))
-	must(container.Provide(service.NewCustomAgentService))
+	must(container.Provide(service.NewCustomAgentServiceWithWorkspaceProvisioning))
 	must(container.Provide(service.NewUserResourceFavoriteService))
 	must(container.Provide(service.NewWikiPageService))
 	must(container.Provide(service.NewWikiIngestService, dig.Name("wikiIngest")))
@@ -587,6 +590,25 @@ func initRedisClient() (*redis.Client, error) {
 	}
 
 	return client, nil
+}
+
+// loadWorkspaceProvisioningConfig reads the optional deployment manifest.
+// A missing file returns a disabled config (feature off by default).
+func loadWorkspaceProvisioningConfig() (*types.WorkspaceProvisioningConfig, error) {
+	return types.LoadWorkspaceProvisioningConfig(config.ConfigDir())
+}
+
+// initializeWorkspaceProvisioning preflights and reconciles deployment-owned
+// providers and the governance policy at startup. Failures abort startup so
+// a broken manifest cannot silently leave an unhealthy deployment.
+func initializeWorkspaceProvisioning(
+	modelRepo interfaces.ModelRepository,
+	modelPolicy interfaces.ModelPolicyService,
+	cfg *types.WorkspaceProvisioningConfig,
+) error {
+	return service.InitializeWorkspaceProvisioning(
+		context.Background(), modelRepo, modelPolicy, cfg,
+	)
 }
 
 // initDatabase initializes database connection

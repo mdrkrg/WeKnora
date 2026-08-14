@@ -325,3 +325,22 @@ func LanguageLocaleName(locale string) string {
 		return locale
 	}
 }
+
+// knowledgeBaseCreationDefaultsCtxKey marks KB policy application that happens
+// on creation paths (CreateKnowledgeBase, KB initialization). Update paths
+// omit the marker so manifest default parser rules are not re-applied to
+// pre-existing knowledge bases.
+type knowledgeBaseCreationDefaultsCtxKey struct{}
+
+// WithKnowledgeBaseCreationDefaults returns a ctx tagged as a KB creation
+// path for the model governance policy.
+func WithKnowledgeBaseCreationDefaults(ctx context.Context) context.Context {
+	return context.WithValue(ctx, knowledgeBaseCreationDefaultsCtxKey{}, true)
+}
+
+// IsKnowledgeBaseCreationDefaults reports whether the ctx is tagged as a KB
+// creation path.
+func IsKnowledgeBaseCreationDefaults(ctx context.Context) bool {
+	value, _ := ctx.Value(knowledgeBaseCreationDefaultsCtxKey{}).(bool)
+	return value
+}

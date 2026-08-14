@@ -1,0 +1,79 @@
+# config/workspace_provisioning.yaml — deployment-owned platform configuration.
+#
+# Copy to config/workspace_provisioning.yaml (or point
+# WEKNORA_WORKSPACE_PROVISIONING_CONFIG at a custom path) and set enabled: true
+# to activate. While enabled, the provider catalog and the governance policy
+# are owned by this manifest: they are reconciled on every startup and
+# runtime modifications are rejected.
+#
+# Values may reference environment variables with ${NAME}; unset or empty
+# variables fail the load (strict mode).
+#
+# Builtin models themselves are NOT declared here — they keep their upstream
+# lifecycle in config/builtin_models.yaml. This manifest only references
+# model IDs (defaults + policy bindings).
+
+version: 1
+enabled: false
+
+# Deployment-approved provider catalog. When enabled, this list REPLACES any
+# catalog previously managed through runtime APIs.
+providers:
+  # - id: internal
+  #   display_name: Internal API
+  #   adapter: generic
+  #   base_url: ${INTERNAL_LLM_BASE_URL}
+  #   approved: true
+  #   allow_custom_base_url: false
+  #   model_types: [KnowledgeQA, Embedding, Rerank]
+
+# Defaults applied only to newly created tenant resources (workspace, KB,
+# agent). Explicit user choices always win over these defaults.
+defaults:
+  chat_model_id: builtin-llm-default
+  embedding_model_id: builtin-embedding-default
+  rerank_model_id: builtin-rerank-default
+  parser_profile:
+    id: deploy-default
+    engine: mineru
+    file_types: [pdf, docx, pptx]
+
+# Governance policy, deployment-owned. Present while enabled, this becomes
+# the effective ModelGovernancePolicy (fixed ingestion bindings and the
+# locked parser profile). References must be existing active builtin models.
+#
+# parser_profile.overrides carries deployment-owned parser values (e.g.
+# mineru_endpoint for the self-hosted mineru engine; mineru_cloud engines
+# consume mineru_api_key instead). In enforce mode they are injected at
+# parse time and WIN over tenant/upload overrides; their keys are locked so
+# tenants can no longer configure them. Keys are lowercased at load and must
+# match the snake_case keys parser engines consume. Secrets may use ${NAME}
+# env refs (expanded from the deployment environment; the settings-KV
+# fallback path does NOT expand them).
+#
+# OPERATIONAL NOTES (enforce mode):
+# - Enable the manifest on a deployment that starts enforcing from day one.
+#   KBs created before enforce keep their stored ingest models; ingestion
+#   converges to the fixed bindings automatically (logged as warnings), and
+#   editing such KBs converges their stored models too — no per-KB migration
+#   is required. Only KB creation with an explicit conflicting model is
+#   rejected.
+# - The provider catalog must list every remote model provider in use.
+#   With an empty or incomplete catalog, enforce rejects models whose
+#   provider is not approved — including interactive chat calls.
+#   Use mode: audit first to observe violations before enforcing.
+policy:
+  mode: enforce
+  require_explicit_provider: true
+  fixed_ingest_embedding_id: builtin-embedding-default
+  fixed_ingest_summary_id: ""
+  fixed_ingest_vlm_id: ""
+  fixed_ingest_asr_id: ""
+  parser_profile:
+    id: deploy-locked-parser
+    engine: mineru
+    file_types: [pdf, docx]
+    locked_override_keys: []
+    # overrides:
+    #   mineru_endpoint: ${MINERU_ENDPOINT}
+    #   mineru_model: ${MINERU_MODEL}
