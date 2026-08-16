@@ -1685,8 +1685,7 @@ func (h *SystemHandler) CreateSystemUser(c *gin.Context) {
 		return
 	}
 
-	req.TenantProvisioning = h.resolveDefaultTenantMode(ctx)
-	user, generatedPassword, err := h.userSvc.AdminCreateUser(ctx, &req, req.TenantProvisioning)
+	user, generatedPassword, err := h.userSvc.AdminCreateUser(ctx, &req, h.resolveDefaultTenantMode(ctx))
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrPasswordPolicy), strings.Contains(err.Error(), "already exists"):
