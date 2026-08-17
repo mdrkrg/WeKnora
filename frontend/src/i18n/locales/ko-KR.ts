@@ -37,7 +37,8 @@ export default {
       settingsManage: '플랫폼 설정을 변경합니다.',
       runtimeRead: '작업 큐와 상세 정보를 조회합니다.',
       runtimeManage: '작업을 재시도, 실행, 취소 또는 삭제합니다.',
-      auditRead: '플랫폼 감사 로그를 조회합니다.'
+      auditRead: '플랫폼 감사 로그를 조회합니다.',
+      usersManage: '사용자 생성 엔드포인트를 통해 로컬 사용자 계정을 만듭니다.'
     },
     capabilities: {
       tenantsRead: '워크스페이스 조회',
@@ -46,7 +47,8 @@ export default {
       settingsManage: '시스템 설정 관리',
       runtimeRead: '런타임 조회',
       runtimeManage: '런타임 관리',
-      auditRead: '시스템 감사 조회'
+      auditRead: '시스템 감사 조회',
+      usersManage: '사용자 생성'
     }
   },
   tenantInvitation: {
