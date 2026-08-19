@@ -37,7 +37,8 @@ export default {
       settingsManage: '更新和重置平台级运行设置。',
       runtimeRead: '查看任务队列和任务详情。',
       runtimeManage: '重试、立即执行、取消或删除运行时任务。',
-      auditRead: '读取平台级审计日志。'
+      auditRead: '读取平台级审计日志。',
+      usersManage: '通过创建用户接口开通本地用户账号。'
     },
     capabilities: {
       tenantsRead: '查看空间',
@@ -46,7 +47,8 @@ export default {
       settingsManage: '管理系统设置',
       runtimeRead: '查看运行时',
       runtimeManage: '管理运行时',
-      auditRead: '查看系统审计'
+      auditRead: '查看系统审计',
+      usersManage: '创建用户'
     }
   },
   tenantInvitation: {
