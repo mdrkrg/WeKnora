@@ -338,6 +338,9 @@ type LTIConfig struct {
 	// (mirroring the OIDC callback channel). Disabled by default so the shell
 	// doesn't surface a session-minting endpoint unless explicitly opted in.
 	SelfHandoffEnable bool `yaml:"self_handoff_enable" json:"self_handoff_enable"`
+	// PlaceholderDomain hosts synthetic email addresses for launches that
+	// carry no directory/email claim (RFC 2606 reserved, never delivered).
+	PlaceholderDomain string `yaml:"placeholder_domain" json:"placeholder_domain"`
 }
 
 // DefaultLTINonceMaxAge and DefaultLTITicketTTL are the secure fallbacks
@@ -788,6 +791,9 @@ func applyLTIEnvOverrides(cfg *Config) {
 	if cfg.LTI.FrameAncestors == "" {
 		cfg.LTI.FrameAncestors = "'self'"
 	}
+	if cfg.LTI.PlaceholderDomain == "" {
+		cfg.LTI.PlaceholderDomain = "users.lti.invalid"
+	}
 
 	if value := strings.TrimSpace(os.Getenv("LTI_ENABLE")); value != "" {
 		cfg.LTI.Enable = strings.EqualFold(value, "true")
@@ -819,6 +825,9 @@ func applyLTIEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("LTI_SELF_HANDOFF_ENABLE")); value != "" {
 		cfg.LTI.SelfHandoffEnable = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_PLACEHOLDER_DOMAIN")); value != "" {
+		cfg.LTI.PlaceholderDomain = value
 	}
 }
 

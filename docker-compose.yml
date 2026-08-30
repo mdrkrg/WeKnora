@@ -367,6 +367,7 @@ services:
       - LTI_TICKET_TTL=${LTI_TICKET_TTL:-}
       - LTI_DIRECTORY_CLAIM=${LTI_DIRECTORY_CLAIM:-}
       - LTI_SELF_HANDOFF_ENABLE=${LTI_SELF_HANDOFF_ENABLE:-false}
+      - LTI_PLACEHOLDER_DOMAIN=${LTI_PLACEHOLDER_DOMAIN:-}
       # 飞书云文档解析模式 export：导出为docx，blocks：根据飞书云文档块解析为markdown。默认为:export
       - FEISHU_DOCX_PARSE_MODE=${FEISHU_DOCX_PARSE_MODE:-export}
     depends_on:

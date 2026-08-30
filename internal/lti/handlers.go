@@ -225,6 +225,8 @@ func (h *Handler) Launch(c *gin.Context) {
 
 	res, err := h.resolver.Resolve(c.Request.Context(), &LaunchIdentity{
 		RegistrationID: reg.ID,
+		ClientID:       reg.ClientID,
+		Issuer:         reg.Issuer,
 		Sub:            vt.Sub,
 		Email:          vt.Email,
 		DirectoryUID:   vt.DirectoryUID,
