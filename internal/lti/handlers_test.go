@@ -12,6 +12,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/lti/ltitest"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
@@ -62,7 +63,7 @@ func testLTIHandler(t *testing.T, deps *handlerDeps) *Handler {
 	if minter == nil {
 		minter = &fakeMinter{}
 	}
-	return NewHandler(cfg, registrations, tickets, keys, verifier, resolver, minter)
+	return NewHandler(cfg, registrations, tickets, keys, verifier, resolver, minter, deps.audit)
 }
 
 type handlerDeps struct {
@@ -73,6 +74,7 @@ type handlerDeps struct {
 	verifier      *Verifier
 	resolver      IdentityResolver
 	minter        TokenMinter
+	audit         AuditSink
 }
 
 func postForm(t *testing.T, h *Handler, path string, values url.Values) *httptest.ResponseRecorder {
@@ -373,4 +375,79 @@ func TestRedeemRejectsExpiredTicket(t *testing.T) {
 	h2 := testLTIHandler(t, &handlerDeps{tickets: tickets2})
 	w2 := redeemPost(t, h2, "redeem-secret", `{"ticket":"raw-1"}`)
 	require.Equal(t, http.StatusGone, w2.Code)
+}
+
+func TestLaunchAuditsTicketIssued(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	setupNonceEnv(t)
+	state, err := SignNonceState("nonce-abc")
+	require.NoError(t, err)
+
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	keys, err := p.Keyfunc()
+	require.NoError(t, err)
+	audit := &fakeAuditSink{}
+	h := testLTIHandler(t, &handlerDeps{
+		registrations: regs,
+		verifier:      NewVerifier(&fakeKeysets{kf: keys}),
+		resolver:      &fakeResolver{res: &IdentityResolution{UserID: "weknora-user-1"}},
+		tickets:       &fakeTicketService{raw: "ticket-raw-1"},
+		audit:         audit,
+	})
+
+	tok := ltiClaims(p, func(m jwt.MapClaims) { m["nonce"] = "nonce-abc" })
+	w := postLaunch(t, h, tok, state)
+	require.Equal(t, http.StatusFound, w.Code)
+
+	require.Len(t, audit.entries, 1)
+	entry := audit.entries[0]
+	require.Equal(t, AuditActionLTITicketIssued, entry.Action)
+	require.Equal(t, "weknora-user-1", entry.ActorUserID)
+	require.Equal(t, types.AuditOutcomeSuccess, entry.Outcome)
+	details := string(entry.Details)
+	require.Contains(t, details, `"iss":"https://platform.example.com"`)
+	require.Contains(t, details, `"context_id":"course-42"`)
+}
+
+func TestRedeemAuditsSuccess(t *testing.T) {
+	audit := &fakeAuditSink{}
+	minter := &fakeMinter{defaultResult: &TokenResult{AccessToken: "at", RefreshToken: "rt"}}
+	tickets := &fakeTicketService{consumeRes: &Ticket{
+		UserID:    "weknora-user-1",
+		ContextID: "course-42",
+	}}
+	h := testLTIHandler(t, &handlerDeps{tickets: tickets, minter: minter, audit: audit})
+
+	w := redeemPost(t, h, "redeem-secret", `{"ticket":"raw-1"}`)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	require.Len(t, audit.entries, 1)
+	entry := audit.entries[0]
+	require.Equal(t, AuditActionLTITicketRedeemed, entry.Action)
+	require.Equal(t, "weknora-user-1", entry.ActorUserID)
+	require.Equal(t, types.AuditOutcomeSuccess, entry.Outcome)
+}
+
+func TestRedeemAuditsReplayDenied(t *testing.T) {
+	audit := &fakeAuditSink{}
+	tickets := &fakeTicketService{consumeErr: ErrTicketConsumed}
+	h := testLTIHandler(t, &handlerDeps{tickets: tickets, audit: audit})
+
+	w := redeemPost(t, h, "redeem-secret", `{"ticket":"raw-1"}`)
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	require.Len(t, audit.entries, 1)
+	entry := audit.entries[0]
+	require.Equal(t, AuditActionLTITicketRedeemDenied, entry.Action)
+	require.Equal(t, types.AuditOutcomeDenied, entry.Outcome)
+	require.Contains(t, string(entry.Details), `"reason":"consumed"`)
+}
+
+func TestRedeemDoesNotAuditBadSecret(t *testing.T) {
+	audit := &fakeAuditSink{}
+	h := testLTIHandler(t, &handlerDeps{audit: audit})
+
+	w := redeemPost(t, h, "wrong-secret", `{"ticket":"x"}`)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Empty(t, audit.entries)
 }
