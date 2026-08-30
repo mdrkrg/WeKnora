@@ -31,6 +31,10 @@ var (
 	// ErrRegistrationNoKeyset is returned when a registration has neither a
 	// JWKS URI nor a cached keyset to verify against.
 	ErrRegistrationNoKeyset = errors.New("lti: registration has no jwks_uri and no cached keyset")
+	// ErrUserServiceCapability is returned by the user-service adapters when
+	// the wired service does not implement the LTI slice (UserCatalog /
+	// IssueLTITokens), i.e. a deployment is missing LTI support.
+	ErrUserServiceCapability = errors.New("lti: user service does not implement the LTI capability")
 	// ErrIDTokenMissingSub/Nonce/MessageType/DeploymentID are returned when an
 	// id_token lacks a claim the LTI 1.3 spec marks as required.
 	ErrIDTokenMissingSub          = errors.New("lti: id_token missing sub")
