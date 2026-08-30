@@ -24,6 +24,7 @@ type Config struct {
 	Auth            *AuthConfig            `yaml:"auth"             json:"auth"`
 	Audit           *AuditConfig           `yaml:"audit"            json:"audit"`
 	OIDCAuth        *OIDCAuthConfig        `yaml:"oidc_auth"        json:"oidc_auth"`
+	LTI             *LTIConfig             `yaml:"lti"              json:"lti"`
 	Models          []ModelConfig          `yaml:"models"           json:"models"`
 	VectorDatabase  *VectorDatabaseConfig  `yaml:"vector_database"  json:"vector_database"`
 	DocReader       *DocReaderConfig       `yaml:"docreader"        json:"docreader"`
@@ -320,6 +321,28 @@ type OIDCAuthConfig struct {
 	UserInfoMapping       *OIDCUserInfoMapping `yaml:"user_info_mapping"      json:"user_info_mapping"`
 }
 
+// LTIConfig holds LTI 1.3 tool-side settings. Sourced from the LTI_* env
+// group at startup (see applyLTIEnvOverrides).
+type LTIConfig struct {
+	Enable              bool          `yaml:"enable"                json:"enable"`
+	HandoffURL          string        `yaml:"handoff_url"           json:"handoff_url"`
+	HandoffSharedSecret string        `yaml:"handoff_shared_secret" json:"-"`
+	LaunchURL           string        `yaml:"launch_url"            json:"launch_url"`
+	FrameAncestors      string        `yaml:"frame_ancestors"       json:"frame_ancestors"`
+	NonceMaxAge         time.Duration `yaml:"nonce_max_age"         json:"nonce_max_age"`
+	TicketTTL           time.Duration `yaml:"ticket_ttl"            json:"ticket_ttl"`
+	DirectoryClaim      string        `yaml:"directory_claim"       json:"directory_claim"`
+}
+
+// DefaultLTINonceMaxAge and DefaultLTITicketTTL are the secure fallbacks
+// applied by applyLTIEnvOverrides when the LTI_* env group leaves the values
+// unset. The lti package references them too so the tool core and config
+// cannot drift apart.
+const (
+	DefaultLTINonceMaxAge = 10 * time.Minute
+	DefaultLTITicketTTL   = 120 * time.Second
+)
+
 // PromptTemplateI18n holds localized name and description for a prompt template.
 type PromptTemplateI18n struct {
 	Name        string `yaml:"name"        json:"name"`
@@ -578,6 +601,7 @@ func LoadConfig() (*Config, error) {
 
 	// Validate configuration values
 	applyOIDCEnvOverrides(&cfg)
+	applyLTIEnvOverrides(&cfg)
 	applyAgentEnvOverrides(&cfg)
 	applyKnowledgeBaseEnvOverrides(&cfg)
 	applyAuthAndTenantDefaults(&cfg)
@@ -742,6 +766,50 @@ func applyOIDCEnvOverrides(cfg *Config) {
 	}
 	if cfg.OIDCAuth.DiscoveryURL == "" && cfg.OIDCAuth.IssuerURL != "" {
 		cfg.OIDCAuth.DiscoveryURL = strings.TrimRight(cfg.OIDCAuth.IssuerURL, "/") + "/.well-known/openid-configuration"
+	}
+}
+
+func applyLTIEnvOverrides(cfg *Config) {
+	if cfg.LTI == nil {
+		cfg.LTI = &LTIConfig{}
+	}
+	if cfg.LTI.NonceMaxAge <= 0 {
+		cfg.LTI.NonceMaxAge = DefaultLTINonceMaxAge
+	}
+	if cfg.LTI.TicketTTL <= 0 {
+		cfg.LTI.TicketTTL = DefaultLTITicketTTL
+	}
+	if cfg.LTI.FrameAncestors == "" {
+		cfg.LTI.FrameAncestors = "'self'"
+	}
+
+	if value := strings.TrimSpace(os.Getenv("LTI_ENABLE")); value != "" {
+		cfg.LTI.Enable = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_HANDOFF_URL")); value != "" {
+		cfg.LTI.HandoffURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_HANDOFF_SHARED_SECRET")); value != "" {
+		cfg.LTI.HandoffSharedSecret = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_LAUNCH_URL")); value != "" {
+		cfg.LTI.LaunchURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_FRAME_ANCESTORS")); value != "" {
+		cfg.LTI.FrameAncestors = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_NONCE_MAX_AGE")); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d > 0 {
+			cfg.LTI.NonceMaxAge = d
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_TICKET_TTL")); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d > 0 {
+			cfg.LTI.TicketTTL = d
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_DIRECTORY_CLAIM")); value != "" {
+		cfg.LTI.DirectoryClaim = value
 	}
 }
 

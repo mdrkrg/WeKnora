@@ -352,6 +352,15 @@ services:
       - OIDC_AUTH_SCOPES=${OIDC_AUTH_SCOPES:-}
       - OIDC_USER_INFO_MAPPING_USER_NAME=${OIDC_USER_INFO_MAPPING_USER_NAME:-}
       - OIDC_USER_INFO_MAPPING_EMAIL=${OIDC_USER_INFO_MAPPING_EMAIL:-}
+      # ========== LTI 1.3 认证（可选，LTI_ENABLE=true 启用，详见 .env.example）==========
+      - LTI_ENABLE=${LTI_ENABLE:-false}
+      - LTI_HANDOFF_URL=${LTI_HANDOFF_URL:-}
+      - LTI_HANDOFF_SHARED_SECRET=${LTI_HANDOFF_SHARED_SECRET:-}
+      - LTI_LAUNCH_URL=${LTI_LAUNCH_URL:-}
+      - LTI_FRAME_ANCESTORS=${LTI_FRAME_ANCESTORS:-}
+      - LTI_NONCE_MAX_AGE=${LTI_NONCE_MAX_AGE:-}
+      - LTI_TICKET_TTL=${LTI_TICKET_TTL:-}
+      - LTI_DIRECTORY_CLAIM=${LTI_DIRECTORY_CLAIM:-}
       # 飞书云文档解析模式 export：导出为docx，blocks：根据飞书云文档块解析为markdown。默认为:export
       - FEISHU_DOCX_PARSE_MODE=${FEISHU_DOCX_PARSE_MODE:-export}
     depends_on:
