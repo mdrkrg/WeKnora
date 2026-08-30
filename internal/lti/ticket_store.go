@@ -53,9 +53,25 @@ func (s *ticketStore) Consume(ctx context.Context, tokenHash string) (*Ticket, e
 	return &t, nil
 }
 
+// ticketTombstoneTTL keeps consumed rows long enough to detect replays before purge.
+const ticketTombstoneTTL = 24 * time.Hour
+
 func (s *ticketStore) DeleteExpired(ctx context.Context, cutoff time.Time) (int64, error) {
+	// Unconsumed tickets past their expiry were never redeemed; there is no
+	// tombstone value in keeping them.
 	res := s.db.WithContext(ctx).
-		Where("expires_at < ?", cutoff).
+		Where("expires_at < ? AND consumed_at IS NULL", cutoff).
 		Delete(&Ticket{})
-	return res.RowsAffected, res.Error
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	deleted := res.RowsAffected
+	// Consumed tombstones older than the replay-detection window.
+	res = s.db.WithContext(ctx).
+		Where("consumed_at IS NOT NULL AND consumed_at < ?", cutoff.Add(-ticketTombstoneTTL)).
+		Delete(&Ticket{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return deleted + res.RowsAffected, nil
 }

@@ -140,11 +140,12 @@ func (f *fakeTicketStore) Consume(_ context.Context, tokenHash string) (*Ticket,
 		if f.now != nil {
 			now = f.now()
 		}
-		if now.After(t.ExpiresAt) {
-			return nil, ErrTicketExpired
-		}
+		// Consumed wins over expiry, mirroring the real store: replay reads as consumed.
 		if t.ConsumedAt != nil {
 			return nil, ErrTicketConsumed
+		}
+		if now.After(t.ExpiresAt) {
+			return nil, ErrTicketExpired
 		}
 		t.ConsumedAt = &now
 		return t, nil
@@ -156,7 +157,13 @@ func (f *fakeTicketStore) DeleteExpired(_ context.Context, cutoff time.Time) (in
 	kept := f.tickets[:0]
 	var deleted int64
 	for _, t := range f.tickets {
-		if t.ExpiresAt.Before(cutoff) {
+		if t.ConsumedAt != nil {
+			// Tombstone: purge only once past the replay-detection window.
+			if t.ConsumedAt.Before(cutoff.Add(-ticketTombstoneTTL)) {
+				deleted++
+				continue
+			}
+		} else if t.ExpiresAt.Before(cutoff) {
 			deleted++
 			continue
 		}

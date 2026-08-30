@@ -35,3 +35,4 @@ CREATE TABLE IF NOT EXISTS lti_tickets (
 
 CREATE INDEX IF NOT EXISTS idx_lti_tickets_user_id ON lti_tickets (user_id);
 CREATE INDEX IF NOT EXISTS idx_lti_tickets_expires_at ON lti_tickets (expires_at);
+CREATE INDEX IF NOT EXISTS idx_lti_tickets_consumed_at ON lti_tickets (consumed_at);

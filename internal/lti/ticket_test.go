@@ -93,3 +93,30 @@ func TestTicketServiceDeleteExpired(t *testing.T) {
 	require.Equal(t, int64(2), deleted)
 	require.Empty(t, store.tickets)
 }
+
+// Replay within the window must still 409; past it the sweep purges.
+func TestTicketServiceDeleteExpiredKeepsTombstoneWithinWindow(t *testing.T) {
+	store := &fakeTicketStore{}
+	svc := NewTicketService(store, 120*time.Second)
+
+	raw, err := svc.Issue(context.Background(), "user-1", "c1", nil)
+	require.NoError(t, err)
+	_, err = svc.Consume(context.Background(), raw)
+	require.NoError(t, err)
+
+	// Past expiry but within the tombstone window: retained, replay still 409.
+	store.now = func() time.Time { return time.Now().Add(time.Hour) }
+	deleted, err := svc.DeleteExpired(context.Background(), time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, int64(0), deleted)
+	require.Len(t, store.tickets, 1)
+	_, err = svc.Consume(context.Background(), raw)
+	require.ErrorIs(t, err, ErrTicketConsumed)
+
+	// Beyond the tombstone window: swept, replay now reads as not-found.
+	store.now = func() time.Time { return time.Now().Add(ticketTombstoneTTL + time.Hour) }
+	deleted, err = svc.DeleteExpired(context.Background(), time.Now().Add(ticketTombstoneTTL+time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deleted)
+	require.Empty(t, store.tickets)
+}
