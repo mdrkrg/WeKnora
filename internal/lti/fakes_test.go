@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 type fakeKeysets struct {
@@ -105,20 +106,12 @@ func (f *fakeResolver) Resolve(_ context.Context, _ *LaunchIdentity) (*IdentityR
 type fakeMinter struct {
 	defaultResult  *TokenResult
 	defaultErr     error
-	forTenantRes   *TokenResult
-	forTenantErr   error
-	lastTenantID   uint64
 	lastDefaultUID string
 }
 
 func (f *fakeMinter) IssueDefault(_ context.Context, userID string) (*TokenResult, error) {
 	f.lastDefaultUID = userID
 	return f.defaultResult, f.defaultErr
-}
-
-func (f *fakeMinter) IssueForTenant(_ context.Context, _ string, tenantID uint64) (*TokenResult, error) {
-	f.lastTenantID = tenantID
-	return f.forTenantRes, f.forTenantErr
 }
 
 type fakeTicketStore struct {
@@ -171,4 +164,13 @@ func (f *fakeTicketStore) DeleteExpired(_ context.Context, cutoff time.Time) (in
 	}
 	f.tickets = kept
 	return deleted, nil
+}
+
+type fakeAuditSink struct {
+	entries []*types.AuditLog
+}
+
+func (f *fakeAuditSink) Log(_ context.Context, entry *types.AuditLog) error {
+	f.entries = append(f.entries, entry)
+	return nil
 }

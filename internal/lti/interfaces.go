@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 // RegistrationStore persists per-platform LTI registrations and the cached
@@ -52,4 +53,11 @@ type IdentityResolver interface {
 // (home) workspace.
 type TokenMinter interface {
 	IssueDefault(ctx context.Context, userID string) (*TokenResult, error)
+}
+
+// AuditSink records security-relevant LTI events (launch ticket issuance and
+// redemption, including replay attempts). A nil sink degrades to a no-op so
+// deployments without an audit service keep zero deployment semantics.
+type AuditSink interface {
+	Log(ctx context.Context, entry *types.AuditLog) error
 }
