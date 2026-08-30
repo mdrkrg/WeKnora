@@ -1,6 +1,7 @@
 package lti
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +12,18 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+)
+
+// Audit actions emitted by the protocol handlers. Defined package-locally
+// so the shell stays deployment-agnostic and does not extend the platform's
+// types package.
+const (
+	// AuditActionLTITicketIssued fires when a launch resolves an account and
+	// a single-use ticket is minted.
+	AuditActionLTITicketIssued types.AuditAction = "lti.ticket_issued"
 )
 
 // Handler serves the LTI endpoints. All dependencies are injected so the
@@ -25,6 +36,7 @@ type Handler struct {
 	verifier      *Verifier
 	resolver      IdentityResolver
 	minter        TokenMinter
+	audit         AuditSink
 }
 
 // NewHandler wires an LTI handler.
@@ -36,6 +48,7 @@ func NewHandler(
 	verifier *Verifier,
 	resolver IdentityResolver,
 	minter TokenMinter,
+	audit AuditSink,
 ) *Handler {
 	return &Handler{
 		cfg:           cfg,
@@ -45,7 +58,25 @@ func NewHandler(
 		verifier:      verifier,
 		resolver:      resolver,
 		minter:        minter,
+		audit:         audit,
 	}
+}
+
+// emitAudit is a no-op when no audit sink is configured.
+func (h *Handler) emitAudit(ctx context.Context, entry *types.AuditLog) {
+	if h.audit == nil {
+		return
+	}
+	_ = h.audit.Log(ctx, entry)
+}
+
+// auditDetailsJSON renders a key/value map as the Details JSON payload.
+func auditDetailsJSON(m map[string]any) types.JSON {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return types.JSON("{}")
+	}
+	return types.JSON(b)
 }
 
 // LoginInitiation implements the LTI 1.3 OIDC third-party initiated login
@@ -200,6 +231,24 @@ func (h *Handler) Launch(c *gin.Context) {
 		return
 	}
 
+	raw, err := h.tickets.Issue(c.Request.Context(), res.UserID, vt.ContextID, vt.Roles)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "签发登录凭证失败。")
+		return
+	}
+	h.emitAudit(c.Request.Context(), &types.AuditLog{
+		Action:        AuditActionLTITicketIssued,
+		ActorUserID:   res.UserID,
+		TargetType:    "lti_ticket",
+		RequestPath:   c.Request.URL.Path,
+		RequestMethod: c.Request.Method,
+		Outcome:       types.AuditOutcomeSuccess,
+		Details: auditDetailsJSON(map[string]any{
+			"iss":        reg.Issuer,
+			"client_id":  reg.ClientID,
+			"context_id": vt.ContextID,
+		}),
+	})
 	handoff := strings.TrimSpace(h.cfg.HandoffURL)
 	if handoff == "" {
 		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "未配置 handoff 地址。")
@@ -208,12 +257,6 @@ func (h *Handler) Launch(c *gin.Context) {
 	target, err := url.Parse(handoff)
 	if err != nil {
 		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "handoff 地址无效。")
-		return
-	}
-
-	raw, err := h.tickets.Issue(c.Request.Context(), res.UserID, vt.ContextID, vt.Roles)
-	if err != nil {
-		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "签发登录凭证失败。")
 		return
 	}
 	q := target.Query()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/lti/ltitest"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
@@ -26,12 +27,12 @@ func testLTIHandler(t *testing.T, deps *handlerDeps) *Handler {
 		deps = &handlerDeps{}
 	}
 	cfg := &config.LTIConfig{
-		Enable:              true,
-		HandoffURL:          "https://app.example.com/api/auth/lti/handoff",
-		LaunchURL:           "https://tool.example.com/lti/launch",
-		FrameAncestors:      "'self'",
-		NonceMaxAge:         10 * time.Minute,
-		TicketTTL:           120 * time.Second,
+		Enable:         true,
+		HandoffURL:     "https://app.example.com/api/auth/lti/handoff",
+		LaunchURL:      "https://tool.example.com/lti/launch",
+		FrameAncestors: "'self'",
+		NonceMaxAge:    10 * time.Minute,
+		TicketTTL:      120 * time.Second,
 	}
 	if deps.cfg != nil {
 		cfg = deps.cfg
@@ -60,7 +61,7 @@ func testLTIHandler(t *testing.T, deps *handlerDeps) *Handler {
 	if minter == nil {
 		minter = &fakeMinter{}
 	}
-	return NewHandler(cfg, registrations, tickets, keys, verifier, resolver, minter)
+	return NewHandler(cfg, registrations, tickets, keys, verifier, resolver, minter, deps.audit)
 }
 
 type handlerDeps struct {
@@ -71,6 +72,7 @@ type handlerDeps struct {
 	verifier      *Verifier
 	resolver      IdentityResolver
 	minter        TokenMinter
+	audit         AuditSink
 }
 
 func postForm(t *testing.T, h *Handler, path string, values url.Values) *httptest.ResponseRecorder {
@@ -288,3 +290,34 @@ func TestJWKSPublishesToolKeys(t *testing.T) {
 	require.Equal(t, "RSA", body.Keys[0]["kty"])
 }
 
+func TestLaunchAuditsTicketIssued(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	setupNonceEnv(t)
+	state, err := SignNonceState("nonce-abc")
+	require.NoError(t, err)
+
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	keys, err := p.Keyfunc()
+	require.NoError(t, err)
+	audit := &fakeAuditSink{}
+	h := testLTIHandler(t, &handlerDeps{
+		registrations: regs,
+		verifier:      NewVerifier(&fakeKeysets{kf: keys}),
+		resolver:      &fakeResolver{res: &IdentityResolution{UserID: "weknora-user-1"}},
+		tickets:       &fakeTicketService{raw: "ticket-raw-1"},
+		audit:         audit,
+	})
+
+	tok := ltiClaims(p, func(m jwt.MapClaims) { m["nonce"] = "nonce-abc" })
+	w := postLaunch(t, h, tok, state)
+	require.Equal(t, http.StatusFound, w.Code)
+
+	require.Len(t, audit.entries, 1)
+	entry := audit.entries[0]
+	require.Equal(t, AuditActionLTITicketIssued, entry.Action)
+	require.Equal(t, "weknora-user-1", entry.ActorUserID)
+	require.Equal(t, types.AuditOutcomeSuccess, entry.Outcome)
+	details := string(entry.Details)
+	require.Contains(t, details, `"iss":"https://platform.example.com"`)
+	require.Contains(t, details, `"context_id":"course-42"`)
+}
