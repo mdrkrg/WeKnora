@@ -2,6 +2,7 @@ package lti
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -116,7 +117,16 @@ func newTestEngine(h *Handler) *gin.Engine {
 	r.POST("/lti/launch", h.Launch)
 	r.GET("/.well-known/jwks.json", h.JWKS)
 	r.POST("/lti/tickets/redeem", h.Redeem)
+	r.GET("/lti/handoff", h.Handoff)
 	return r
+}
+
+func getHandoff(t *testing.T, h *Handler, ticket string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/lti/handoff?ticket="+url.QueryEscape(ticket), nil)
+	newTestEngine(h).ServeHTTP(w, req)
+	return w
 }
 
 func TestLoginInitiationUnknownRegistration(t *testing.T) {
@@ -450,4 +460,128 @@ func TestRedeemDoesNotAuditBadSecret(t *testing.T) {
 	w := redeemPost(t, h, "wrong-secret", `{"ticket":"x"}`)
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 	require.Empty(t, audit.entries)
+
+func TestJWKSInertWhenDisabled(t *testing.T) {
+	h := testLTIHandler(t, &handlerDeps{cfg: &config.LTIConfig{Enable: false}})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	newTestEngine(h).ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestLaunchHandoffURLKeepsExistingQuery pins that a handoff URL which already
+// carries a query string is extended rather than corrupted to "?ticket=".
+func TestLaunchHandoffURLKeepsExistingQuery(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	setupNonceEnv(t)
+	state, err := SignNonceState("nonce-abc")
+	require.NoError(t, err)
+	keys, err := p.Keyfunc()
+	require.NoError(t, err)
+	h := testLTIHandler(t, &handlerDeps{
+		cfg: &config.LTIConfig{
+			Enable:         true,
+			HandoffURL:     "https://app.example.com/h?foo=bar",
+			LaunchURL:      "https://tool.example.com/lti/launch",
+			NonceMaxAge:    10 * time.Minute,
+			TicketTTL:      120 * time.Second,
+			FrameAncestors: "'self'",
+		},
+		registrations: &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}},
+		verifier:      NewVerifier(&fakeKeysets{kf: keys}),
+		resolver:      &fakeResolver{res: &IdentityResolution{UserID: "weknora-user-1"}},
+		tickets:       &fakeTicketService{raw: "ticket-raw-1"},
+	})
+	tok := ltiClaims(p, func(m jwt.MapClaims) { m["nonce"] = "nonce-abc" })
+	w := postLaunch(t, h, tok, state)
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Equal(t, "https://app.example.com/h?foo=bar&ticket=ticket-raw-1", w.Header().Get("Location"))
+}
+
+func TestHandoffInertWhenDisabled(t *testing.T) {
+	h := testLTIHandler(t, nil)
+	w := getHandoff(t, h, "whatever")
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestHandoffDeliversSessionViaHash(t *testing.T) {
+	audit := &fakeAuditSink{}
+	minter := &fakeMinter{defaultResult: &TokenResult{AccessToken: "at", RefreshToken: "rt"}}
+	tickets := &fakeTicketService{consumeRes: &Ticket{
+		UserID:    "weknora-user-1",
+		ContextID: "course-42",
+	}}
+	h := testLTIHandler(t, &handlerDeps{
+		cfg: &config.LTIConfig{
+			Enable:              true,
+			HandoffURL:          "https://app.example.com/api/auth/lti/handoff",
+			HandoffSharedSecret: "redeem-secret",
+			LaunchURL:           "https://tool.example.com/lti/launch",
+			FrameAncestors:      "'self'",
+			NonceMaxAge:         10 * time.Minute,
+			TicketTTL:           120 * time.Second,
+			SelfHandoffEnable:   true,
+		},
+		tickets: tickets,
+		minter:  minter,
+		audit:   audit,
+	})
+
+	w := getHandoff(t, h, "raw-1")
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	loc := w.Header().Get("Location")
+	require.Contains(t, loc, "/#lti_result=")
+
+	// Same decoding the SPA performs.
+	raw := strings.TrimPrefix(loc, "/#lti_result=")
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(decoded, &payload))
+	require.Equal(t, true, payload["success"])
+	require.Equal(t, "at", payload["token"])
+	require.Equal(t, "rt", payload["refresh_token"])
+	require.Equal(t, "weknora-user-1", payload["user_id"])
+	require.Equal(t, "course-42", payload["context_id"])
+
+	// Parity with the S2S redeem audit.
+	require.Len(t, audit.entries, 1)
+	require.Equal(t, AuditActionLTITicketRedeemed, audit.entries[0].Action)
+}
+
+func TestHandoffRedirectsErrorOnConsumedTicket(t *testing.T) {
+	audit := &fakeAuditSink{}
+	tickets := &fakeTicketService{consumeErr: ErrTicketConsumed}
+	h := testLTIHandler(t, &handlerDeps{
+		cfg: &config.LTIConfig{
+			Enable:              true,
+			HandoffURL:          "https://app.example.com/api/auth/lti/handoff",
+			HandoffSharedSecret: "redeem-secret",
+			LaunchURL:           "https://tool.example.com/lti/launch",
+			FrameAncestors:      "'self'",
+			NonceMaxAge:         10 * time.Minute,
+			TicketTTL:           120 * time.Second,
+			SelfHandoffEnable:   true,
+		},
+		tickets: tickets,
+		audit:   audit,
+	})
+
+	w := getHandoff(t, h, "raw-1")
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Contains(t, w.Header().Get("Location"), "/#lti_error=invalid_ticket")
+
+	require.Len(t, audit.entries, 1)
+	require.Equal(t, AuditActionLTITicketRedeemDenied, audit.entries[0].Action)
+	require.Contains(t, string(audit.entries[0].Details), `"reason":"consumed"`)
+}
+
+func TestHandoffMissingTicketRedirectsError(t *testing.T) {
+	h := testLTIHandler(t, &handlerDeps{
+		cfg: &config.LTIConfig{Enable: true, SelfHandoffEnable: true},
+	})
+	w := getHandoff(t, h, "")
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Contains(t, w.Header().Get("Location"), "/#lti_error=missing_ticket")
 }
