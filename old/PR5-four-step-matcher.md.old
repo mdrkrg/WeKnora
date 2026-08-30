@@ -1,0 +1,56 @@
+<!-- Title: feat(lti): four-step matcher and role mapping -->
+
+## Description
+
+在 PR1/PR2/PR3/PR4 之上提供身份解析的**参考实现**，用于 WeKnora 自己的部署。定位为"参考实现"：它依赖三个窄接口（`UserCatalog` / `IdentityStore` / `AuditSink`），上游 reviewer 若反对或替换它，不影响 PR1（协议壳）、PR2（会话铸币）、PR3（嵌入自身）、PR4（身份绑定原语）独立落地。令牌签发（`IssueLTITokens` / `NewUserTokenMinter`）已提前在 PR2 落地，本 PR 不再涉及。
+
+**四步匹配**（`NewMatcher`，替换 PR3 的 email resolver 成为默认）：
+1. 已有 LTI 绑定（`lti:{client_id}` 命名空间）直接命中
+2. 目录（SIS）标识符已绑定到某账号（`sis:{iss}` 命名空间）
+3. 邮箱匹配（`UserCatalog.GetUserByEmail`；`repository.ErrUserNotFound` 视为 miss 落到 step-4，其余错误传播中断）
+4. 建号（claim 邮箱或占位邮箱，RFC 2606 `LTI_PLACEHOLDER_DOMAIN`），审计记录 `lti.member_provisioned`
+
+规则保证：**从不改写已存在账号的邮箱**；step-4 绑定为 best-effort；仅回答"这个人是谁"，workspace 授权由 handoff 路由独立判定。
+
+**角色映射**：IMS LIS membership 角色 URI → 归一化 family（instructor / ta / learner / other）。
+
+**配置**：`LTI_PLACEHOLDER_DOMAIN`（默认 `users.lti.invalid`）。
+
+**测试**：`flow_test.go` 以真实 HTTP 跑通 launch → 四步解析 → 票据 → redeem 全链路（含非成员拒绝分支），并覆盖自托管 handoff 通道（launch → `/lti/handoff` → `#lti_result` hash 建会话、重放 302 拒绝）。
+
+**Commits**（按顺序）：
+1. `5a898cc6` feat(lti): four-step matcher and role mapping
+2. `0da7c4cc` test(lti): pin step-3 error propagation in the matcher
+3. `5a918b15` test(lti): full launch-to-session flow over real HTTP
+
+## Type of Change
+- [ ] 🐛 Bug fix
+- [x] ✨ New feature
+- [ ] 💥 Breaking change
+- [ ] 📚 Documentation update
+- [ ] 🎨 Refactor
+- [ ] ⚡ Performance improvement
+- [x] 🧪 Test
+- [ ] 🔧 Configuration / Build / CI
+
+## Related Issue
+N/A（无关联 issue）
+
+## Testing
+- 逐 commit 验证：`go build ./...` + `go test ./internal/lti/... ./internal/config/... ./internal/container/... ./internal/router/...` 通过
+- 测试覆盖：四步匹配各分支（现有绑定优先、SIS 绑定、邮箱匹配、claim/占位邮箱建号、不改写已有邮箱）、step-3 错误传播（ErrUserNotFound 为 miss、其余中断）、角色 family 映射、全链路 HTTP flow（S2S redeem + 自托管 handoff 双通道）
+- `go vet ./internal/lti/...` 干净；`gofmt` 通过
+
+## Checklist
+- [x] `git diff --check origin/main...HEAD` passes
+- [x] Changed source files are formatted
+- [x] Targeted tests for the changed packages/components pass
+- [ ] Diff-scoped lint passes where applicable（本会话以 `go vet` 验证；`golangci-lint run --new-from-rev=origin/main` 未执行）
+- [x] Full-repository checks were run（76 包 ok）
+- [x] Self-reviewed the code
+- [x] Added/updated tests covering the change
+- [x] Updated related documentation（`LTI_PLACEHOLDER_DOMAIN` 已写入 `.env.example`）
+- [ ] Breaking changes are clearly called out in the description above（无 breaking change，本项 N/A）
+
+## Screenshots / Recordings
+N/A（无用户可见 UI 变更）
