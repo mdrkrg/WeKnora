@@ -130,25 +130,33 @@ const handleGlobalOIDCCallback = async () => {
   const oidcError = params.get('oidc_error')
   const oidcErrorDescription = params.get('oidc_error_description')
   const oidcResult = params.get('oidc_result')
+  // LTI self-handoff mirrors the OIDC channel: #lti_result=<base64url(JSON)>
+  // on success, #lti_error=<code> on failure.
+  const ltiError = params.get('lti_error')
+  const ltiResult = params.get('lti_result')
 
-  if (!oidcError && !oidcResult) return
+  const result = oidcResult || ltiResult
+  const error = oidcError || ltiError
+  const errorMessage = oidcErrorDescription || ltiErrorMessage(ltiError)
 
-  if (oidcError) {
+  if (!error && !result) return
+
+  if (error) {
     clearOIDCCallbackState('/login')
     await router.replace('/login')
-    MessagePlugin.error(oidcErrorDescription || 'OIDC login failed')
+    MessagePlugin.error(errorMessage || 'LTI login failed')
     return
   }
 
   try {
-    if (!oidcResult) {
+    if (!result) {
       clearOIDCCallbackState('/login')
       await router.replace('/login')
-      MessagePlugin.error('OIDC login failed')
+      MessagePlugin.error('LTI login failed')
       return
     }
 
-    const response = decodeOIDCResult(oidcResult)
+    const response = decodeOIDCResult(result)
     if (response.success) {
       clearOIDCCallbackState('/')
       await persistOIDCLoginResponse(response)
@@ -158,13 +166,25 @@ const handleGlobalOIDCCallback = async () => {
 
     clearOIDCCallbackState('/login')
     await router.replace('/login')
-    MessagePlugin.error(response.message || 'OIDC login failed')
+    MessagePlugin.error(response.message || 'LTI login failed')
   } catch (error: any) {
-    console.error('Global OIDC callback handling failed:', error)
+    console.error('Global LTI callback handling failed:', error)
     authStore.logout()
     clearOIDCCallbackState('/login')
     await router.replace('/login')
-    MessagePlugin.error(error.message || 'OIDC login failed')
+    MessagePlugin.error(error.message || 'LTI login failed')
+  }
+}
+
+const ltiErrorMessage = (code: string | null) => {
+  switch (code) {
+    case 'missing_ticket':
+    case 'invalid_ticket':
+      return '登录凭证已失效，请从课程入口重新进入。'
+    case 'server_error':
+      return '登录服务暂时不可用，请稍后重试。'
+    default:
+      return code ? `LTI 登录失败（${code}）` : ''
   }
 }
 
