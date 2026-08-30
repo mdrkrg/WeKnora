@@ -90,6 +90,10 @@ func (f *fakeTicketService) Consume(_ context.Context, _ string) (*Ticket, error
 	return f.consumeRes, f.consumeErr
 }
 
+func (f *fakeTicketService) Restore(context.Context, string) error {
+	return nil
+}
+
 func (f *fakeTicketService) DeleteExpired(_ context.Context, _ time.Time) (int64, error) {
 	return f.deleteRes, f.deleteErr
 }
@@ -152,6 +156,17 @@ func (f *fakeTicketStore) Consume(_ context.Context, tokenHash string) (*Ticket,
 		return t, nil
 	}
 	return nil, ErrTicketNotFound
+}
+
+func (f *fakeTicketStore) Restore(_ context.Context, tokenHash string) error {
+	for _, t := range f.tickets {
+		if t.TokenHash == tokenHash {
+			t.ConsumedAt = nil
+			return nil
+		}
+	}
+	// Unknown row: no-op, mirroring the real store's best-effort contract.
+	return nil
 }
 
 func (f *fakeTicketStore) DeleteExpired(_ context.Context, cutoff time.Time) (int64, error) {
