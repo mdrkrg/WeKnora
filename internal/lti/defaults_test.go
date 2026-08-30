@@ -10,12 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDisabledTokenMinterRejects(t *testing.T) {
-	m := NewDisabledTokenMinter()
-	_, err := m.IssueDefault(context.Background(), "u1")
-	require.ErrorIs(t, err, ErrTokenMinterDisabled)
-}
-
 func TestDisabledIdentityResolverRejects(t *testing.T) {
 	r := NewDisabledIdentityResolver()
 	_, err := r.Resolve(context.Background(), &LaunchIdentity{Sub: "s1"})
