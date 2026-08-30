@@ -10,12 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDisabledIdentityResolverRejects(t *testing.T) {
-	r := NewDisabledIdentityResolver()
-	_, err := r.Resolve(context.Background(), &LaunchIdentity{Sub: "s1"})
-	require.ErrorIs(t, err, ErrIdentityDisabled)
-}
-
 func TestNilAuditSinkIsNoop(t *testing.T) {
 	sink := NewAuditSink(nil)
 	require.NoError(t, sink.Log(context.Background(), &types.AuditLog{Action: AuditActionLTITicketIssued}))

@@ -14,9 +14,9 @@ var (
 	ErrTicketExpired = errors.New("lti: ticket expired")
 	// ErrTicketConsumed is returned when a single-use ticket was already used.
 	ErrTicketConsumed = errors.New("lti: ticket already consumed")
-	// ErrIdentityDisabled is returned by the placeholder identity resolver
-	// until a real one is wired in.
-	ErrIdentityDisabled = errors.New("lti: identity resolution not configured")
+	// ErrIdentityNotFound is returned when no existing WeKnora account matches
+	// the launch identity (e.g. an email-match resolver finds no user).
+	ErrIdentityNotFound = errors.New("lti: no matching account for the launch identity")
 	// ErrNoWorkspace is returned by the token minter when a resolved user has
 	// no home workspace, so a default-tenant issuance is impossible.
 	ErrNoWorkspace = errors.New("lti: user has no default workspace")
