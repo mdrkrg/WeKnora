@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 type fakeKeysets struct {
@@ -171,4 +172,13 @@ func (f *fakeTicketStore) DeleteExpired(_ context.Context, cutoff time.Time) (in
 	}
 	f.tickets = kept
 	return deleted, nil
+}
+
+type fakeAuditSink struct {
+	entries []*types.AuditLog
+}
+
+func (f *fakeAuditSink) Log(_ context.Context, entry *types.AuditLog) error {
+	f.entries = append(f.entries, entry)
+	return nil
 }
