@@ -85,3 +85,19 @@ func TestApplyLTIEnvOverrides_EnableCaseInsensitive(t *testing.T) {
 		t.Fatal("LTI_ENABLE=false should keep LTI disabled")
 	}
 }
+
+func TestApplyLTIEnvOverrides_SelfHandoff(t *testing.T) {
+	t.Setenv("LTI_SELF_HANDOFF_ENABLE", "")
+	cfg := &Config{LTI: &LTIConfig{}}
+	applyLTIEnvOverrides(cfg)
+	if cfg.LTI.SelfHandoffEnable {
+		t.Fatal("self-handoff should default to disabled")
+	}
+
+	t.Setenv("LTI_SELF_HANDOFF_ENABLE", "true")
+	cfg = &Config{LTI: &LTIConfig{}}
+	applyLTIEnvOverrides(cfg)
+	if !cfg.LTI.SelfHandoffEnable {
+		t.Fatal("LTI_SELF_HANDOFF_ENABLE=true should enable self-handoff")
+	}
+}

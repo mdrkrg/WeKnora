@@ -27,6 +27,9 @@ type TicketStore interface {
 	// Consume atomically marks a ticket consumed; it must fail with
 	// ErrTicketNotFound/ErrTicketExpired/ErrTicketConsumed as appropriate.
 	Consume(ctx context.Context, tokenHash string) (*Ticket, error)
+	// Restore reverses a Consume after a failed redemption so the ticket can
+	// be retried; unknown or unconsumed rows are no-op successes.
+	Restore(ctx context.Context, tokenHash string) error
 	DeleteExpired(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
@@ -34,6 +37,7 @@ type TicketStore interface {
 type TicketService interface {
 	Issue(ctx context.Context, userID, contextID string, roles []string) (raw string, err error)
 	Consume(ctx context.Context, raw string) (*Ticket, error)
+	Restore(ctx context.Context, raw string) error
 	DeleteExpired(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
