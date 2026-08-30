@@ -412,6 +412,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(lti.NewVerifier))
 	must(container.Provide(lti.NewDisabledIdentityResolver))
 	must(container.Provide(lti.NewDisabledTokenMinter))
+	must(container.Provide(lti.NewAuditSink))
 	must(container.Provide(lti.NewHandler))
 	must(container.Invoke(startLTITicketCleanup))
 
