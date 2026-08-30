@@ -9,6 +9,10 @@ services:
       - "${FRONTEND_PORT:-80}:80"
     environment:
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
+      # LTI 自托管 handoff：三项由前端入口脚本渲染 SPA 根的 frame 策略，
+      - LTI_ENABLE=${LTI_ENABLE:-false}
+      - LTI_SELF_HANDOFF_ENABLE=${LTI_SELF_HANDOFF_ENABLE:-false}
+      - LTI_FRAME_ANCESTORS=${LTI_FRAME_ANCESTORS:-}
       - APP_HOST=${APP_HOST:-app}
       # APP_BACKEND_PORT: the port NGINX proxies to (default 8080).
       # For local deployment this is the App container's listening port, independent of host-mapped APP_PORT.
@@ -359,6 +363,7 @@ services:
       - LTI_FRAME_ANCESTORS=${LTI_FRAME_ANCESTORS:-}
       - LTI_NONCE_MAX_AGE=${LTI_NONCE_MAX_AGE:-}
       - LTI_TICKET_TTL=${LTI_TICKET_TTL:-}
+      - LTI_SELF_HANDOFF_ENABLE=${LTI_SELF_HANDOFF_ENABLE:-false}
       # 飞书云文档解析模式 export：导出为docx，blocks：根据飞书云文档块解析为markdown。默认为:export
       - FEISHU_DOCX_PARSE_MODE=${FEISHU_DOCX_PARSE_MODE:-export}
     depends_on:
