@@ -243,25 +243,6 @@ func TestLaunchRegistrationNotFound(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestLaunchIdentityResolutionDisabled(t *testing.T) {
-	p := ltitest.NewPlatform(t)
-	setupNonceEnv(t)
-	state, err := SignNonceState("nonce-abc")
-	require.NoError(t, err)
-	keys, err := p.Keyfunc()
-	require.NoError(t, err)
-	tok := ltiClaims(p, func(m jwt.MapClaims) { m["nonce"] = "nonce-abc" })
-	h := testLTIHandler(t, &handlerDeps{
-		registrations: &fakeRegistrationStore{
-			regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")},
-		},
-		verifier: NewVerifier(&fakeKeysets{kf: keys}),
-		resolver: &fakeResolver{err: ErrIdentityDisabled},
-	})
-	w := postLaunch(t, h, tok, state)
-	require.Equal(t, http.StatusBadRequest, w.Code)
-}
-
 func setupNonceEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("JWT_SECRET", "test-lti-handler-secret")

@@ -49,6 +49,12 @@ type IdentityResolver interface {
 	Resolve(ctx context.Context, identity *LaunchIdentity) (*IdentityResolution, error)
 }
 
+// UserCatalog looks up WeKnora accounts by email; identity resolvers depend
+// on it to map a launch identity to an existing account.
+type UserCatalog interface {
+	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
+}
+
 // TokenMinter mints the session JWT pair for a resolved user in their default
 // (home) workspace.
 type TokenMinter interface {
