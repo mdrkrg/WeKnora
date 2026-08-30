@@ -90,6 +90,15 @@ func TestMatcherStep3EmailMatch(t *testing.T) {
 	require.Equal(t, "email", bound.ResolvedVia)
 }
 
+func TestMatcherStep3PropagatesNonNotFoundError(t *testing.T) {
+	us := &fakeUserCatalog{getErr: errors.New("db down")}
+	m := newTestMatcher(us, &fakeIdentityStore{}, nil)
+
+	_, err := m.Resolve(context.Background(), baseIdentity())
+	require.Error(t, err)
+	require.Empty(t, us.registerArgs, "step 4 must not run on a non-not-found lookup error")
+}
+
 func TestMatcherStep4CreatesWithClaimEmail(t *testing.T) {
 	audit := &fakeAuditSink{}
 	m := newTestMatcher(&fakeUserCatalog{}, &fakeIdentityStore{}, audit)
