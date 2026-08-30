@@ -3,6 +3,7 @@ package lti
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -358,6 +359,83 @@ func (h *Handler) Redeem(c *gin.Context) {
 		"access_token":  tokens.AccessToken,
 		"refresh_token": tokens.RefreshToken,
 	})
+}
+
+// Handoff exchanges a launch ticket for a session JWT pair and delivers it to
+// the SPA through the URL hash, mirroring the OIDC callback channel
+// (GET /lti/handoff). It is the browser-side counterpart of Redeem: the ticket
+// itself is the bearer credential (single-use, short TTL, HTTPS-only), so no
+// shared secret is involved; equivalent strength to an OIDC code. The endpoint
+// is inert unless LTI_SELF_HANDOFF_ENABLE is set.
+func (h *Handler) Handoff(c *gin.Context) {
+	if !h.enabled() || h.cfg == nil || !h.cfg.SelfHandoffEnable {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	raw := strings.TrimSpace(c.Query("ticket"))
+	if raw == "" {
+		h.redirectLTIError(c, "missing_ticket")
+		return
+	}
+	ticket, err := h.tickets.Consume(c.Request.Context(), raw)
+	if err != nil {
+		reason := "expired_or_unknown"
+		switch {
+		case errors.Is(err, ErrTicketConsumed):
+			reason = "consumed"
+		case errors.Is(err, ErrTicketExpired), errors.Is(err, ErrTicketNotFound):
+			reason = "expired_or_unknown"
+		default:
+			h.redirectLTIError(c, "server_error")
+			return
+		}
+		h.emitAudit(c.Request.Context(), &types.AuditLog{
+			Action:        AuditActionLTITicketRedeemDenied,
+			RequestPath:   c.Request.URL.Path,
+			RequestMethod: c.Request.Method,
+			Outcome:       types.AuditOutcomeDenied,
+			Details:       auditDetailsJSON(map[string]any{"reason": reason}),
+		})
+		h.redirectLTIError(c, "invalid_ticket")
+		return
+	}
+
+	tokens, err := h.minter.IssueDefault(c.Request.Context(), ticket.UserID)
+	if err != nil {
+		h.redirectLTIError(c, "server_error")
+		return
+	}
+
+	details := map[string]any{"context_id": ticket.ContextID}
+	h.emitAudit(c.Request.Context(), &types.AuditLog{
+		Action:        AuditActionLTITicketRedeemed,
+		ActorUserID:   ticket.UserID,
+		TargetType:    "lti_ticket",
+		RequestPath:   c.Request.URL.Path,
+		RequestMethod: c.Request.Method,
+		Outcome:       types.AuditOutcomeSuccess,
+		Details:       auditDetailsJSON(details),
+	})
+
+	payload, err := json.Marshal(map[string]any{
+		"success":       true,
+		"token":         tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+		"user_id":       ticket.UserID,
+		"context_id":    ticket.ContextID,
+	})
+	if err != nil {
+		h.redirectLTIError(c, "server_error")
+		return
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	c.Redirect(http.StatusFound, "/#lti_result="+url.QueryEscape(encoded))
+}
+
+// redirectLTIError sends the browser back to the SPA with an lti_error hash so
+// the callback handler can surface a message and route to the login page.
+func (h *Handler) redirectLTIError(c *gin.Context, code string) {
+	c.Redirect(http.StatusFound, "/#lti_error="+url.QueryEscape(code))
 }
 
 func (h *Handler) enabled() bool {
