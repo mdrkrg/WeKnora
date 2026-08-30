@@ -2,6 +2,7 @@ package lti
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,12 @@ const (
 	// AuditActionLTITicketIssued fires when a launch resolves an account and
 	// a single-use ticket is minted.
 	AuditActionLTITicketIssued types.AuditAction = "lti.ticket_issued"
+	// AuditActionLTITicketRedeemed fires when a ticket is successfully
+	// exchanged for a session JWT pair.
+	AuditActionLTITicketRedeemed types.AuditAction = "lti.ticket_redeemed"
+	// AuditActionLTITicketRedeemDenied fires when redemption is rejected,
+	// most notably a replay attempt (reason=consumed).
+	AuditActionLTITicketRedeemDenied types.AuditAction = "lti.ticket_redeem_denied"
 )
 
 // Handler serves the LTI endpoints. All dependencies are injected so the
@@ -232,6 +239,17 @@ func (h *Handler) Launch(c *gin.Context) {
 		return
 	}
 
+	handoff := strings.TrimSpace(h.cfg.HandoffURL)
+	if handoff == "" {
+		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "未配置 handoff 地址。")
+		return
+	}
+	target, err := url.Parse(handoff)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "handoff 地址无效。")
+		return
+	}
+
 	raw, err := h.tickets.Issue(c.Request.Context(), res.UserID, vt.ContextID, vt.Roles)
 	if err != nil {
 		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "签发登录凭证失败。")
@@ -250,16 +268,6 @@ func (h *Handler) Launch(c *gin.Context) {
 			"context_id": vt.ContextID,
 		}),
 	})
-	handoff := strings.TrimSpace(h.cfg.HandoffURL)
-	if handoff == "" {
-		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "未配置 handoff 地址。")
-		return
-	}
-	target, err := url.Parse(handoff)
-	if err != nil {
-		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "handoff 地址无效。")
-		return
-	}
 	q := target.Query()
 	q.Set("ticket", raw)
 	target.RawQuery = q.Encode()
@@ -285,6 +293,123 @@ func (h *Handler) JWKS(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"keys": []json.RawMessage{jwk}})
+}
+
+// restoreTicketAfterFailedRedemption hands a consumed ticket back after a
+// mint failure, so the same ticket can be retried. Best-effort, logged only.
+func (h *Handler) restoreTicketAfterFailedRedemption(ctx context.Context, raw string) {
+	if raw == "" {
+		return
+	}
+	if err := h.tickets.Restore(ctx, raw); err != nil {
+		logger.Warnf(ctx, "redeem: failed to restore ticket after mint failure: %v", err)
+	}
+}
+
+// Handoff exchanges a launch ticket for a session JWT pair and delivers it to
+// the SPA through the URL hash, mirroring the OIDC callback channel
+// (GET /lti/handoff). The ticket itself is the bearer credential (single-use,
+// short TTL, HTTPS-only), so no shared secret is involved; equivalent strength
+// to an OIDC code. The endpoint is inert unless LTI_SELF_HANDOFF_ENABLE is set.
+func (h *Handler) Handoff(c *gin.Context) {
+	if !h.enabled() || h.cfg == nil || !h.cfg.SelfHandoffEnable {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	raw := strings.TrimSpace(c.Query("ticket"))
+	if raw == "" {
+		h.redirectLTIError(c, "missing_ticket")
+		return
+	}
+	ticket, err := h.tickets.Consume(c.Request.Context(), raw)
+	if err != nil {
+		var reason string
+		switch {
+		case errors.Is(err, ErrTicketConsumed):
+			reason = "consumed"
+		case errors.Is(err, ErrTicketExpired), errors.Is(err, ErrTicketNotFound):
+			reason = "expired_or_unknown"
+		default:
+			h.redirectLTIError(c, "server_error")
+			return
+		}
+		h.emitAudit(c.Request.Context(), &types.AuditLog{
+			Action:        AuditActionLTITicketRedeemDenied,
+			RequestPath:   c.Request.URL.Path,
+			RequestMethod: c.Request.Method,
+			Outcome:       types.AuditOutcomeDenied,
+			Details:       auditDetailsJSON(map[string]any{"reason": reason}),
+		})
+		h.redirectLTIError(c, "invalid_ticket")
+		return
+	}
+
+	tokens, err := h.minter.IssueDefault(c.Request.Context(), ticket.UserID)
+	if err != nil {
+		// Mint failures are a server-side denial of an otherwise valid
+		// ticket: audit them with enough detail (user_id suffices to trace
+		// the binding row; the sub/authority are never in the ticket) and
+		// surface a specific code so the SPA can explain the failure.
+		reason := "server_error"
+		switch {
+		case errors.Is(err, ErrNoWorkspace):
+			reason = "no_workspace"
+		}
+		h.emitAudit(c.Request.Context(), &types.AuditLog{
+			Action:        AuditActionLTITicketRedeemDenied,
+			ActorUserID:   ticket.UserID,
+			TargetType:    "lti_ticket",
+			RequestPath:   c.Request.URL.Path,
+			RequestMethod: c.Request.Method,
+			Outcome:       types.AuditOutcomeDenied,
+			Details: auditDetailsJSON(map[string]any{
+				"reason":     reason,
+				"user_id":    ticket.UserID,
+				"context_id": ticket.ContextID,
+			}),
+		})
+		// Mirror Redeem: hand the ticket back so a handoff URL still in
+		// browser history stays re-presentable once the issue is resolved.
+		h.restoreTicketAfterFailedRedemption(c.Request.Context(), raw)
+		h.redirectLTIError(c, reason)
+		return
+	}
+
+	details := map[string]any{"context_id": ticket.ContextID}
+	h.emitAudit(c.Request.Context(), &types.AuditLog{
+		Action:        AuditActionLTITicketRedeemed,
+		ActorUserID:   ticket.UserID,
+		TargetType:    "lti_ticket",
+		RequestPath:   c.Request.URL.Path,
+		RequestMethod: c.Request.Method,
+		Outcome:       types.AuditOutcomeSuccess,
+		Details:       auditDetailsJSON(details),
+	})
+
+	payload, err := json.Marshal(map[string]any{
+		"success":       true,
+		"token":         tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+		"user_id":       ticket.UserID,
+		"context_id":    ticket.ContextID,
+	})
+	if err != nil {
+		h.redirectLTIError(c, "server_error")
+		return
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	// The fragment carries a live session pair; keep it out of shared caches.
+	c.Header("Cache-Control", "no-store")
+	c.Redirect(http.StatusFound, "/#lti_result="+url.QueryEscape(encoded))
+}
+
+// redirectLTIError sends the browser back to the SPA with an lti_error hash so
+// the callback handler can surface a message and route to the login page.
+func (h *Handler) redirectLTIError(c *gin.Context, code string) {
+	// Keep the failure hop out of shared caches too, for symmetry with the
+	// success redirect that carries the session in the fragment.
+	c.Header("Cache-Control", "no-store")
+	c.Redirect(http.StatusFound, "/#lti_error="+url.QueryEscape(code))
 }
 
 func (h *Handler) enabled() bool {
