@@ -17,6 +17,9 @@ var (
 	// ErrIdentityDisabled is returned by the placeholder identity resolver
 	// until a real one is wired in.
 	ErrIdentityDisabled = errors.New("lti: identity resolution not configured")
+	// ErrIdentityNotFound is returned when no existing WeKnora account matches
+	// the launch identity (e.g. an email-match resolver finds no user).
+	ErrIdentityNotFound = errors.New("lti: no matching account for the launch identity")
 	// ErrNotTenantMember is returned by the token minter when a resolved user
 	// has no membership in the requested tenant.
 	ErrNotTenantMember = errors.New("lti: user is not a member of the requested tenant")
