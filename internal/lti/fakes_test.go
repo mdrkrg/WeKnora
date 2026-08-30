@@ -34,11 +34,15 @@ func (f *fakeKeysets) Refresh(_ context.Context, _ *Registration) (keyfunc.Keyfu
 type fakeRegistrationStore struct {
 	regs        []*Registration
 	savedKeyset []string
+	getErr      error
 }
 
 func (f *fakeRegistrationStore) GetByIssuerAndClientID(
 	_ context.Context, issuer, clientID string,
 ) (*Registration, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	for _, r := range f.regs {
 		if r.Issuer == issuer && r.ClientID == clientID {
 			return r, nil
@@ -48,6 +52,9 @@ func (f *fakeRegistrationStore) GetByIssuerAndClientID(
 }
 
 func (f *fakeRegistrationStore) GetByID(_ context.Context, id uint64) (*Registration, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	for _, r := range f.regs {
 		if r.ID == id {
 			return r, nil
@@ -217,7 +224,8 @@ func (f *fakeUserCatalog) Register(_ context.Context, req *types.RegisterRequest
 }
 
 type fakeIdentityStore struct {
-	rows []*ExternalIdentity
+	rows      []*ExternalIdentity
+	upsertErr error
 }
 
 func (f *fakeIdentityStore) GetByAuthorityAndUID(
@@ -232,6 +240,9 @@ func (f *fakeIdentityStore) GetByAuthorityAndUID(
 }
 
 func (f *fakeIdentityStore) Upsert(_ context.Context, id *ExternalIdentity) error {
+	if f.upsertErr != nil {
+		return f.upsertErr
+	}
 	for i, r := range f.rows {
 		if r.Authority == id.Authority && r.ExternalUID == id.ExternalUID {
 			f.rows[i] = id
