@@ -3,9 +3,11 @@ package lti
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -48,7 +50,10 @@ func (v *Verifier) parse(
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
-		if !retried {
+		// Refresh only on an unknown-kid miss (e.g. key rotation); other
+		// failures (expired, tampered, wrong issuer) must not trigger an
+		// outbound keyset fetch from this public endpoint.
+		if !retried && errors.Is(err, jwkset.ErrKeyNotFound) {
 			if _, rerr := v.keysets.Refresh(ctx, reg); rerr == nil {
 				return v.parse(ctx, rawToken, reg, true)
 			}

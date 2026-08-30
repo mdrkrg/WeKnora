@@ -2,6 +2,7 @@ package lti
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,6 +152,39 @@ func (s *swapKeysets) Refresh(context.Context, *Registration) (keyfunc.Keyfunc, 
 	s.refreshCalls++
 	s.kf = s.right
 	return s.kf, nil
+}
+
+func TestVerifyDoesNotRefreshOnExpired(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	kf, err := p.Keyfunc()
+	require.NoError(t, err)
+	keys := &fakeKeysets{kf: kf}
+	v := NewVerifier(keys)
+	reg := baseRegistration("https://platform.example.com", "client-1")
+
+	tok := ltiClaims(p, func(m jwt.MapClaims) {
+		m["exp"] = time.Now().Add(-time.Minute).Unix()
+	})
+	_, err = v.Verify(context.Background(), tok, reg)
+	require.Error(t, err)
+	require.Zero(t, keys.refreshCalls, "expired tokens must not trigger a keyset refresh")
+}
+
+func TestVerifyDoesNotRefreshOnSignatureError(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	// Tamper the payload so the failure is a signature error, not an unknown-kid error.
+	kf, err := p.Keyfunc()
+	require.NoError(t, err)
+	keys := &fakeKeysets{kf: kf}
+	v := NewVerifier(keys)
+	reg := baseRegistration("https://platform.example.com", "client-1")
+
+	tok := ltiClaims(p, nil)
+	parts := strings.Split(tok, ".")
+	tampered := parts[0] + "." + strings.ReplaceAll(parts[1], "A", "B") + "." + parts[2]
+	_, err = v.Verify(context.Background(), tampered, reg)
+	require.Error(t, err)
+	require.Zero(t, keys.refreshCalls, "signature errors must not trigger a keyset refresh")
 }
 
 func TestVerifyRefreshesOnUnknownKid(t *testing.T) {
