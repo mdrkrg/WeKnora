@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/handler"
 	"github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/lti"
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -82,6 +83,7 @@ type RouterParams struct {
 	IMHandler                    *handler.IMHandler
 	EmbedChannelHandler          *handler.EmbedChannelHandler
 	EmbedChannelService          interfaces.EmbedChannelService
+	LTIHandler                   *lti.Handler
 	RedisClient                  *redis.Client
 	DataSourceHandler            *handler.DataSourceHandler
 	DataSourceCredentialsHandler *handler.DataSourceCredentialsHandler
@@ -152,6 +154,10 @@ func NewRouter(params RouterParams) *gin.Engine {
 		r.Use(embedFrameAncestorsMiddleware(params.EmbedChannelService))
 	}
 
+	// LTI pages must be embeddable in the platform's iframe; emit
+	// frame-ancestors for /lti/* from LTI_FRAME_ANCESTORS.
+	r.Use(lti.FrameAncestorsMiddleware(params.Config.LTI))
+
 	// 前端静态文件（仅 Lite 版本内嵌前端）
 	if handler.Edition == "lite" {
 		serveFrontendStatic(r)
@@ -159,6 +165,11 @@ func NewRouter(params RouterParams) *gin.Engine {
 
 	// IM 回调路由（在认证中间件之前注册，使用各平台自身的签名验证）
 	RegisterIMRoutes(r, params.IMHandler)
+
+	// LTI 1.3 公开路由（在认证中间件之前注册；自身完成验签/共享密钥校验）
+	if params.LTIHandler != nil {
+		lti.RegisterPublicRoutes(r, params.LTIHandler)
+	}
 
 	// Web embed 公开路由（使用 publish token 鉴权，不走全局 Auth）
 	RegisterEmbedPublicRoutes(
