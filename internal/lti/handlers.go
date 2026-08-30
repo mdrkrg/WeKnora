@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -215,6 +216,12 @@ func (h *Handler) Launch(c *gin.Context) {
 		return
 	}
 
+	// Record the deployment seen at launch so operators with an empty
+	// deployment_ids allowlist (which deliberately admits any deployment) can
+	// detect which deployment actually launched.
+	logger.Infof(c.Request.Context(), "[LTI] launch verified: iss=%s client_id=%s deployment_id=%s sub=%s",
+		reg.Issuer, reg.ClientID, vt.DeploymentID, vt.Sub)
+
 	res, err := h.resolver.Resolve(c.Request.Context(), &LaunchIdentity{
 		RegistrationID: reg.ID,
 		Sub:            vt.Sub,
@@ -355,7 +362,10 @@ func (h *Handler) enabled() bool {
 }
 
 // launchURL returns the tool's own launch endpoint, from config when set and
-// derived from the request otherwise.
+// derived from the request otherwise. When TLS terminates at a reverse proxy,
+// the backend only ever sees plain HTTP; the X-Forwarded-Proto header (which
+// nginx forwards from $scheme) is honored so the OIDC redirect_uri matches the
+// registered https launch URL.
 func (h *Handler) launchURL(c *gin.Context) string {
 	if h.cfg != nil && strings.TrimSpace(h.cfg.LaunchURL) != "" {
 		return strings.TrimRight(strings.TrimSpace(h.cfg.LaunchURL), "/")
@@ -363,6 +373,9 @@ func (h *Handler) launchURL(c *gin.Context) string {
 	scheme := "https"
 	if c.Request.TLS == nil {
 		scheme = "http"
+		if proto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")); proto != "" {
+			scheme = strings.ToLower(strings.TrimSpace(strings.Split(proto, ",")[0]))
+		}
 	}
 	return scheme + "://" + c.Request.Host + "/lti/launch"
 }
