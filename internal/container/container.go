@@ -76,6 +76,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/lti"
 	"github.com/Tencent/WeKnora/internal/mcp"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -335,6 +336,31 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Invoke(chatpipeline.NewPluginSearchParallel))
 	must(container.Invoke(chatpipeline.NewPluginWikiBoost))
 	logger.Debugf(ctx, "[Container] Chat pipeline plugins registered")
+
+	// LTI 1.3 tool side. Stores, ticket service, keyset cache, token minter
+	// and handler are all deployment-agnostic; the identity resolver is the
+	// pluggable hook deployments replace.
+	logger.Debugf(ctx, "[Container] Registering LTI 1.3 tool...")
+	must(container.Provide(func(cfg *config.Config) *config.LTIConfig {
+		if cfg.LTI == nil {
+			return &config.LTIConfig{}
+		}
+		return cfg.LTI
+	}))
+	must(container.Provide(lti.NewRegistrationStore))
+	must(container.Provide(lti.NewTicketStore))
+	must(container.Provide(lti.NewToolKeyStore))
+	must(container.Provide(func(store lti.TicketStore, cfg *config.LTIConfig) lti.TicketService {
+		return lti.NewTicketService(store, cfg.TicketTTL)
+	}))
+	must(container.Provide(func(regs lti.RegistrationStore) lti.KeysetResolver {
+		return lti.NewKeysetResolver(regs, nil)
+	}))
+	must(container.Provide(lti.NewVerifier))
+	must(container.Provide(lti.NewDisabledIdentityResolver))
+	must(container.Provide(lti.NewDisabledTokenMinter))
+	must(container.Provide(lti.NewHandler))
+	must(container.Invoke(startLTITicketCleanup))
 
 	// HTTP handlers layer
 	logger.Debugf(ctx, "[Container] Registering HTTP handlers...")
@@ -1685,6 +1711,30 @@ func startTemporaryDocumentCleanup(svc interfaces.TemporaryDocumentService, clea
 		}
 	}()
 	cleaner.RegisterWithName("TemporaryDocumentCleanup", func() error {
+		close(stop)
+		return nil
+	})
+}
+
+// startLTITicketCleanup purges expired single-use LTI tickets on a minute
+// ticker, keeping the table bounded.
+func startLTITicketCleanup(tickets lti.TicketService, cleaner interfaces.ResourceCleaner) {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := tickets.DeleteExpired(context.Background(), time.Now()); err != nil {
+					logger.Warnf(context.Background(), "[LTI] ticket cleanup failed: %v", err)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	cleaner.RegisterWithName("LTITicketCleanup", func() error {
 		close(stop)
 		return nil
 	})
