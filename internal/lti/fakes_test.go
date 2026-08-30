@@ -215,3 +215,29 @@ func (f *fakeUserCatalog) Register(_ context.Context, req *types.RegisterRequest
 	f.byEmail[req.Email] = user
 	return user, nil
 }
+
+type fakeIdentityStore struct {
+	rows []*ExternalIdentity
+}
+
+func (f *fakeIdentityStore) GetByAuthorityAndUID(
+	_ context.Context, authority, externalUID string,
+) (*ExternalIdentity, error) {
+	for _, r := range f.rows {
+		if r.Authority == authority && r.ExternalUID == externalUID {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeIdentityStore) Upsert(_ context.Context, id *ExternalIdentity) error {
+	for i, r := range f.rows {
+		if r.Authority == id.Authority && r.ExternalUID == id.ExternalUID {
+			f.rows[i] = id
+			return nil
+		}
+	}
+	f.rows = append(f.rows, id)
+	return nil
+}
