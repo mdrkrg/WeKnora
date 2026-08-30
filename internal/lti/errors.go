@@ -20,6 +20,9 @@ var (
 	// ErrNotTenantMember is returned by the token minter when a resolved user
 	// has no membership in the requested tenant.
 	ErrNotTenantMember = errors.New("lti: user is not a member of the requested tenant")
+	// ErrNoWorkspace is returned by the token minter when a resolved user has
+	// no home workspace, so a default-tenant issuance is impossible.
+	ErrNoWorkspace = errors.New("lti: user has no default workspace")
 	// ErrNonceStateMalformed is returned when a signed nonce state is
 	// structurally invalid (bad shape, encoding, or missing nonce).
 	ErrNonceStateMalformed = errors.New("lti: malformed nonce state")
@@ -31,6 +34,10 @@ var (
 	// ErrRegistrationNoKeyset is returned when a registration has neither a
 	// JWKS URI nor a cached keyset to verify against.
 	ErrRegistrationNoKeyset = errors.New("lti: registration has no jwks_uri and no cached keyset")
+	// ErrUserServiceCapability is returned by the user-service adapters when
+	// the wired service does not implement the LTI slice (UserCatalog /
+	// IssueLTITokens), i.e. a deployment is missing LTI support.
+	ErrUserServiceCapability = errors.New("lti: user service does not implement the LTI capability")
 	// ErrIDTokenMissingSub is returned when an id_token lacks the sub claim,
 	// which the LTI 1.3 spec marks as required.
 	ErrIDTokenMissingSub = errors.New("lti: id_token missing sub")
