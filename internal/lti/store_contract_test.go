@@ -37,6 +37,46 @@ func TestTicketStoreConsumeRoundTrip(t *testing.T) {
 	require.ErrorIs(t, err, ErrTicketConsumed)
 }
 
+func TestTicketStoreRestoreReversesConsume(t *testing.T) {
+	db := setupStoreDB(t)
+	store := NewTicketStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, store.Create(ctx, &Ticket{
+		TokenHash: "h-restore", UserID: "user-1", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+	_, err := store.Consume(ctx, "h-restore")
+	require.NoError(t, err)
+
+	// A redemption that consumed the ticket but failed to mint must be able
+	// to hand the ticket back for a retry.
+	require.NoError(t, store.Restore(ctx, "h-restore"))
+	got, err := store.Consume(ctx, "h-restore")
+	require.NoError(t, err, "ticket must be reusable after Restore")
+	require.Equal(t, "user-1", got.UserID)
+
+	_, err = store.Consume(ctx, "h-restore")
+	require.ErrorIs(t, err, ErrTicketConsumed, "a re-consumed ticket stays single-use")
+}
+
+func TestTicketStoreRestoreNoOpForUnconsumedOrUnknown(t *testing.T) {
+	db := setupStoreDB(t)
+	store := NewTicketStore(db)
+	ctx := context.Background()
+
+	require.NoError(t, store.Create(ctx, &Ticket{
+		TokenHash: "h-fresh", UserID: "user-1", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+
+	// Restoring an unknown hash is a silent no-op (best-effort callers must
+	// never see an error), and an unconsumed row is left untouched.
+	require.NoError(t, store.Restore(ctx, "no-such-hash"))
+	require.NoError(t, store.Restore(ctx, "h-fresh"))
+	got, err := store.Consume(ctx, "h-fresh")
+	require.NoError(t, err)
+	require.Equal(t, "user-1", got.UserID)
+}
+
 func TestTicketStoreConsumeExpired(t *testing.T) {
 	db := setupStoreDB(t)
 	store := NewTicketStore(db)
