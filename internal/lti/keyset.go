@@ -18,6 +18,10 @@ import (
 // maxKeysetSize bounds how large a cached JWKS document may be.
 const maxKeysetSize = 1 << 20 // 1 MiB
 
+// jwksFetchTimeout bounds a single platform JWKS fetch so a stalled platform
+// cannot pin a launch request's goroutine indefinitely.
+const jwksFetchTimeout = 8 * time.Second
+
 type keysetResolver struct {
 	regs   RegistrationStore
 	client *http.Client
@@ -29,10 +33,11 @@ type keysetResolver struct {
 // NewKeysetResolver builds a per-registration verification-key resolver that
 // caches keyfuncs in memory and refreshes on kid miss / rotation. Platform
 // JWKS responses are persisted into the registration row so restarts do not
-// require an immediate refetch.
+// require an immediate refetch. When no client is given, a default with an
+// explicit timeout is used so a stalled platform cannot pin the request.
 func NewKeysetResolver(regs RegistrationStore, client *http.Client) KeysetResolver {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: jwksFetchTimeout}
 	}
 	return &keysetResolver{regs: regs, client: client, cache: make(map[uint64]keyfunc.Keyfunc)}
 }
