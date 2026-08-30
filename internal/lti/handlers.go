@@ -323,11 +323,21 @@ func (h *Handler) Redeem(c *gin.Context) {
 	if req.TenantID != nil && *req.TenantID > 0 {
 		tokens, err = h.minter.IssueForTenant(c.Request.Context(), ticket.UserID, *req.TenantID)
 		if errors.Is(err, ErrNotTenantMember) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "not a member of the target workspace"})
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "not a member of the target workspace",
+				"code":  "not_a_member",
+			})
 			return
 		}
 	} else {
 		tokens, err = h.minter.IssueDefault(c.Request.Context(), ticket.UserID)
+		if errors.Is(err, ErrNoWorkspace) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "user has no default workspace",
+				"code":  "no_workspace",
+			})
+			return
+		}
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server error"})
