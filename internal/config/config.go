@@ -331,6 +331,12 @@ type LTIConfig struct {
 	FrameAncestors      string        `yaml:"frame_ancestors"       json:"frame_ancestors"`
 	NonceMaxAge         time.Duration `yaml:"nonce_max_age"         json:"nonce_max_age"`
 	TicketTTL           time.Duration `yaml:"ticket_ttl"            json:"ticket_ttl"`
+	// SelfHandoffEnable exposes GET /lti/handoff, which lets a deployment use
+	// WeKnora itself as the launch handoff target: the browser exchanges the
+	// ticket for a session and is redirected into the SPA through the URL hash
+	// (mirroring the OIDC callback channel). Disabled by default so the shell
+	// doesn't surface a session-minting endpoint unless explicitly opted in.
+	SelfHandoffEnable bool `yaml:"self_handoff_enable" json:"self_handoff_enable"`
 }
 
 // DefaultLTINonceMaxAge and DefaultLTITicketTTL are the secure fallbacks
@@ -806,6 +812,9 @@ func applyLTIEnvOverrides(cfg *Config) {
 		if d, err := time.ParseDuration(value); err == nil && d > 0 {
 			cfg.LTI.TicketTTL = d
 		}
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_SELF_HANDOFF_ENABLE")); value != "" {
+		cfg.LTI.SelfHandoffEnable = strings.EqualFold(value, "true")
 	}
 }
 
