@@ -89,9 +89,13 @@ type Ticket struct {
 func (Ticket) TableName() string { return "lti_tickets" }
 
 // LaunchIdentity is the identity material the launch handler hands to the
-// IdentityResolver.
+// IdentityResolver. ClientID and Issuer are carried from the verified
+// registration so the resolver can derive namespaced binding authorities
+// without another lookup.
 type LaunchIdentity struct {
 	RegistrationID uint64
+	ClientID       string
+	Issuer         string
 	Sub            string
 	Email          string
 	DirectoryUID   string
