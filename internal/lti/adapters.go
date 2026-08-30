@@ -8,10 +8,12 @@ import (
 )
 
 // userCatalogAdapter is the narrow slice of the user service the identity
-// resolvers need (email match, and account registration for provisioning). It
-// is satisfied by *service.userService via a lazy type assertion.
+// resolvers need (email match, account registration for provisioning) plus
+// the by-ID lookup the bindings API uses to validate push targets. It is
+// satisfied by *service.userService via a lazy type assertion.
 type userCatalogAdapter interface {
 	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
+	GetUserByID(ctx context.Context, id string) (*types.User, error)
 	Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
 }
 
@@ -41,6 +43,14 @@ func (a *userCatalog) GetUserByEmail(ctx context.Context, email string) (*types.
 		return nil, err
 	}
 	return svc.GetUserByEmail(ctx, email)
+}
+
+func (a *userCatalog) GetUserByID(ctx context.Context, id string) (*types.User, error) {
+	svc, err := a.svc()
+	if err != nil {
+		return nil, err
+	}
+	return svc.GetUserByID(ctx, id)
 }
 
 func (a *userCatalog) Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error) {

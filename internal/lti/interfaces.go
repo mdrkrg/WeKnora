@@ -53,10 +53,12 @@ type IdentityResolver interface {
 	Resolve(ctx context.Context, identity *LaunchIdentity) (*IdentityResolution, error)
 }
 
-// UserCatalog looks up and registers WeKnora accounts by email; identity
-// resolvers depend on it to map a launch identity to an existing account.
+// UserCatalog looks up and registers WeKnora accounts; identity resolvers
+// depend on it to map a launch identity to an existing account, and the
+// bindings API uses GetUserByID to validate push targets.
 type UserCatalog interface {
 	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
+	GetUserByID(ctx context.Context, id string) (*types.User, error)
 	Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
 }
 

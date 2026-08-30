@@ -201,6 +201,7 @@ func (f *fakeAuditSink) Log(_ context.Context, entry *types.AuditLog) error {
 
 type fakeUserCatalog struct {
 	byEmail      map[string]*types.User
+	byID         map[string]*types.User
 	registerArgs []*types.RegisterRequest
 	registerErr  error
 	getErr       error
@@ -212,6 +213,16 @@ func (f *fakeUserCatalog) GetUserByEmail(_ context.Context, email string) (*type
 		return nil, f.getErr
 	}
 	if u := f.byEmail[email]; u != nil {
+		return u, nil
+	}
+	return nil, repository.ErrUserNotFound
+}
+
+func (f *fakeUserCatalog) GetUserByID(_ context.Context, id string) (*types.User, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if u := f.byID[id]; u != nil {
 		return u, nil
 	}
 	return nil, repository.ErrUserNotFound
@@ -229,4 +240,42 @@ func (f *fakeUserCatalog) Register(_ context.Context, req *types.RegisterRequest
 	}
 	f.byEmail[req.Email] = user
 	return user, nil
+}
+
+type fakeIdentityStore struct {
+	rows []*ExternalIdentity
+}
+
+func (f *fakeIdentityStore) GetByAuthorityAndUID(
+	_ context.Context, authority, externalUID string,
+) (*ExternalIdentity, error) {
+	for _, r := range f.rows {
+		if r.Authority == authority && r.ExternalUID == externalUID {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeIdentityStore) Upsert(_ context.Context, id *ExternalIdentity) error {
+	for i, r := range f.rows {
+		if r.Authority == id.Authority && r.ExternalUID == id.ExternalUID {
+			f.rows[i] = id
+			return nil
+		}
+	}
+	f.rows = append(f.rows, id)
+	return nil
+}
+
+func (f *fakeIdentityStore) Delete(
+	_ context.Context, authority, externalUID string,
+) (int64, error) {
+	for i, r := range f.rows {
+		if r.Authority == authority && r.ExternalUID == externalUID {
+			f.rows = append(f.rows[:i], f.rows[i+1:]...)
+			return 1, nil
+		}
+	}
+	return 0, nil
 }

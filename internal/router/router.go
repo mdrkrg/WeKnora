@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/lti"
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/tracing/langfuse"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 
 	_ "github.com/Tencent/WeKnora/docs" // swagger docs
@@ -84,6 +86,7 @@ type RouterParams struct {
 	EmbedChannelHandler          *handler.EmbedChannelHandler
 	EmbedChannelService          interfaces.EmbedChannelService
 	LTIHandler                   *lti.Handler
+	LTIBindingsHandler           *lti.BindingsHandler
 	RedisClient                  *redis.Client
 	DataSourceHandler            *handler.DataSourceHandler
 	DataSourceCredentialsHandler *handler.DataSourceCredentialsHandler
@@ -240,6 +243,16 @@ func NewRouter(params RouterParams) *gin.Engine {
 		v1.Use(rbacGuards.apiKeyAuthorizer.Middleware())
 
 		RegisterAuthRoutes(v1, params.AuthHandler, rbacGuards)
+		if params.LTIBindingsHandler != nil {
+			// LTI directory-binding push/delete (provisioning daemon):
+			// platform API key with the manage_members capability.
+			rbacGuards.apiKeyRoute(v1, http.MethodPost, "/lti/bindings",
+				apiKeyPlatform(types.APIKeyCapabilityManageMembers),
+				params.LTIBindingsHandler.Create)
+			rbacGuards.apiKeyRoute(v1, http.MethodDelete, "/lti/bindings",
+				apiKeyPlatform(types.APIKeyCapabilityManageMembers),
+				params.LTIBindingsHandler.Delete)
+		}
 		RegisterTenantRoutes(v1, params.TenantHandler, params.TenantMemberHandler, params.TenantInvitationHandler, params.AuditLogHandler, rbacGuards)
 		RegisterMyInvitationRoutes(v1, params.TenantInvitationHandler)
 		RegisterKnowledgeBaseRoutes(v1, params.KBHandler, rbacGuards)

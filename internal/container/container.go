@@ -403,6 +403,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(lti.NewRegistrationStore))
 	must(container.Provide(lti.NewTicketStore))
 	must(container.Provide(lti.NewToolKeyStore))
+	must(container.Provide(lti.NewIdentityStore))
 	must(container.Provide(func(store lti.TicketStore, cfg *config.LTIConfig) lti.TicketService {
 		return lti.NewTicketService(store, cfg.TicketTTL)
 	}))
@@ -416,6 +417,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	}))
 	must(container.Provide(lti.NewUserTokenMinter))
 	must(container.Provide(lti.NewAuditSink))
+	must(container.Provide(lti.NewBindingsHandler))
 	must(container.Provide(lti.NewHandler))
 	must(container.Invoke(startLTITicketCleanup))
 
