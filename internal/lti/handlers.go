@@ -230,11 +230,14 @@ func (h *Handler) Launch(c *gin.Context) {
 		Roles:          vt.Roles,
 	})
 	if err != nil {
-		if errors.Is(err, ErrIdentityDisabled) {
+		switch {
+		case errors.Is(err, ErrIdentityDisabled):
 			h.renderFailure(c, http.StatusBadRequest, "暂不可用", "LTI 身份解析尚未配置。")
-			return
+		case errors.Is(err, ErrIdentityNotFound):
+			h.renderFailure(c, http.StatusBadRequest, "无匹配账号", "该邮箱未对应任何 WeKnora 账号，无法登录。")
+		default:
+			h.renderFailure(c, http.StatusInternalServerError, "服务错误", "身份解析失败。")
 		}
-		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "身份解析失败。")
 		return
 	}
 
