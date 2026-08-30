@@ -53,6 +53,16 @@ func (s *ticketStore) Consume(ctx context.Context, tokenHash string) (*Ticket, e
 	return &t, nil
 }
 
+// Restore reverses a Consume after a failed redemption so the ticket can be
+// retried. Scoped like Consume's atomic guard (consumed rows only); unknown
+// or unconsumed rows are no-op successes.
+func (s *ticketStore) Restore(ctx context.Context, tokenHash string) error {
+	res := s.db.WithContext(ctx).Model(&Ticket{}).
+		Where("token_hash = ? AND consumed_at IS NOT NULL", tokenHash).
+		UpdateColumn("consumed_at", nil)
+	return res.Error
+}
+
 // ticketTombstoneTTL keeps consumed rows long enough to detect replays before purge.
 const ticketTombstoneTTL = 24 * time.Hour
 

@@ -58,6 +58,13 @@ func (s *ticketService) Consume(ctx context.Context, raw string) (*Ticket, error
 	return s.store.Consume(ctx, hashToken(raw))
 }
 
+func (s *ticketService) Restore(ctx context.Context, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	return s.store.Restore(ctx, hashToken(raw))
+}
+
 func (s *ticketService) DeleteExpired(ctx context.Context, cutoff time.Time) (int64, error) {
 	return s.store.DeleteExpired(ctx, cutoff)
 }
