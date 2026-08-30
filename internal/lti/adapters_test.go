@@ -14,11 +14,16 @@ import (
 type stubUserService struct {
 	interfaces.UserService
 	byEmail  map[string]*types.User
+	byID     map[string]*types.User
 	register *types.RegisterRequest
 }
 
 func (s *stubUserService) GetUserByEmail(_ context.Context, email string) (*types.User, error) {
 	return s.byEmail[email], nil
+}
+
+func (s *stubUserService) GetUserByID(_ context.Context, id string) (*types.User, error) {
+	return s.byID[id], nil
 }
 
 func (s *stubUserService) Register(_ context.Context, req *types.RegisterRequest) (*types.User, error) {
@@ -31,6 +36,15 @@ func TestUserCatalogForwardsLookup(t *testing.T) {
 	uc := NewUserCatalog(svc)
 
 	u, err := uc.GetUserByEmail(context.Background(), "a@b.c")
+	require.NoError(t, err)
+	require.Equal(t, "u1", u.ID)
+}
+
+func TestUserCatalogForwardsLookupByID(t *testing.T) {
+	svc := &stubUserService{byID: map[string]*types.User{"u1": {ID: "u1"}}}
+	uc := NewUserCatalog(svc)
+
+	u, err := uc.GetUserByID(context.Background(), "u1")
 	require.NoError(t, err)
 	require.Equal(t, "u1", u.ID)
 }

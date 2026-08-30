@@ -61,7 +61,8 @@ func TestBindingsUnknownRegistrationRejected(t *testing.T) {
 func TestBindingsCreatesSisBinding(t *testing.T) {
 	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
 	ids := &fakeIdentityStore{}
-	h := testBindingsHandler(regs, ids, testCatalog("weknora-u1"), &fakeAuditSink{})
+	audit := &fakeAuditSink{}
+	h := testBindingsHandler(regs, ids, testCatalog("weknora-u1"), audit)
 
 	w := bindingsPost(t, h, `{"registration_id":1,"external_uid":"20240001","user_id":"weknora-u1"}`)
 	require.Equal(t, http.StatusOK, w.Code)
@@ -71,6 +72,113 @@ func TestBindingsCreatesSisBinding(t *testing.T) {
 	require.NotNil(t, got)
 	require.Equal(t, "weknora-u1", got.UserID)
 	require.Equal(t, "sis", got.ResolvedVia)
+
+	require.Len(t, audit.entries, 1)
+	require.Equal(t, AuditActionLTIBindingPushed, audit.entries[0].Action)
+	require.Equal(t, "weknora-u1", audit.entries[0].ActorUserID)
+	details := auditDetails(t, audit.entries[0])
+	require.Equal(t, "sis:https://platform.example.com", details["authority"])
+	require.Equal(t, "20240001", details["external_uid"])
+}
+
+// auditDetails decodes an audit entry's Details payload for assertions.
+func auditDetails(t *testing.T, entry *types.AuditLog) map[string]any {
+	t.Helper()
+	details := map[string]any{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Details), &details))
+	return details
+}
+
+func TestBindingsDeleteDirectoryScope(t *testing.T) {
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	ids := &fakeIdentityStore{}
+	audit := &fakeAuditSink{}
+	h := testBindingsHandler(regs, ids, &fakeUserCatalog{}, audit)
+
+	require.Equal(t, http.StatusOK,
+		bindingsPost(t, h, `{"registration_id":1,"external_uid":"20240001","user_id":"weknora-u1"}`).Code)
+
+	w := bindingsDelete(t, h, `{"registration_id":1,"external_uid":"20240001","scope":"directory"}`)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	got, err := ids.GetByAuthorityAndUID(context.Background(), "sis:https://platform.example.com", "20240001")
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	// push + delete, in that order
+	require.Len(t, audit.entries, 2)
+	require.Equal(t, AuditActionLTIBindingDeleted, audit.entries[1].Action)
+	details := auditDetails(t, audit.entries[1])
+	require.Equal(t, "sis:https://platform.example.com", details["authority"])
+	require.Equal(t, "20240001", details["external_uid"])
+	require.Equal(t, "directory", details["scope"])
+}
+
+func TestBindingsDeleteScopeDefaultsToDirectory(t *testing.T) {
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	ids := &fakeIdentityStore{rows: []*ExternalIdentity{{
+		UserID: "u1", Authority: "sis:https://platform.example.com", ExternalUID: "20240001",
+	}}}
+	h := testBindingsHandler(regs, ids, &fakeUserCatalog{}, &fakeAuditSink{})
+
+	w := bindingsDelete(t, h, `{"registration_id":1,"external_uid":"20240001"}`)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Empty(t, ids.rows)
+}
+
+func TestBindingsDeleteLaunchScope(t *testing.T) {
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	ids := &fakeIdentityStore{rows: []*ExternalIdentity{{
+		UserID: "u1", Authority: "lti:client-1", ExternalUID: "sub-1",
+	}}}
+	audit := &fakeAuditSink{}
+	h := testBindingsHandler(regs, ids, &fakeUserCatalog{}, audit)
+
+	w := bindingsDelete(t, h, `{"registration_id":1,"external_uid":"sub-1","scope":"launch"}`)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	got, err := ids.GetByAuthorityAndUID(context.Background(), "lti:client-1", "sub-1")
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	require.Len(t, audit.entries, 1)
+	details := auditDetails(t, audit.entries[0])
+	require.Equal(t, "lti:client-1", details["authority"])
+	require.Equal(t, "launch", details["scope"])
+}
+
+func TestBindingsDeleteMissingRow(t *testing.T) {
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	audit := &fakeAuditSink{}
+	h := testBindingsHandler(regs, &fakeIdentityStore{}, &fakeUserCatalog{}, audit)
+
+	w := bindingsDelete(t, h, `{"registration_id":1,"external_uid":"ghost"}`)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Empty(t, audit.entries)
+}
+
+func TestBindingsDeleteInvalidScope(t *testing.T) {
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	h := testBindingsHandler(regs, &fakeIdentityStore{}, &fakeUserCatalog{}, &fakeAuditSink{})
+
+	require.Equal(t, http.StatusBadRequest,
+		bindingsDelete(t, h, `{"registration_id":1,"external_uid":"x","scope":"other"}`).Code)
+}
+
+func TestBindingsDeleteUnknownRegistration(t *testing.T) {
+	h := testBindingsHandler(&fakeRegistrationStore{}, &fakeIdentityStore{}, &fakeUserCatalog{}, &fakeAuditSink{})
+
+	require.Equal(t, http.StatusBadRequest,
+		bindingsDelete(t, h, `{"registration_id":999,"external_uid":"x"}`).Code)
+}
+
+func TestBindingsDeleteMissingFields(t *testing.T) {
+	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
+	h := testBindingsHandler(regs, &fakeIdentityStore{}, &fakeUserCatalog{}, &fakeAuditSink{})
+
+	require.Equal(t, http.StatusBadRequest, bindingsDelete(t, h, `{"registration_id":1}`).Code)
+	require.Equal(t, http.StatusBadRequest, bindingsDelete(t, h, `{"external_uid":"x"}`).Code)
+	require.Equal(t, http.StatusBadRequest, bindingsDelete(t, h, `not-json`).Code)
 }
 
 func TestBindingsIdempotentRetry(t *testing.T) {
