@@ -93,7 +93,7 @@ func TestBindingsDeleteDirectoryScope(t *testing.T) {
 	regs := &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}}
 	ids := &fakeIdentityStore{}
 	audit := &fakeAuditSink{}
-	h := testBindingsHandler(regs, ids, &fakeUserCatalog{}, audit)
+	h := testBindingsHandler(regs, ids, testCatalog("weknora-u1"), audit)
 
 	require.Equal(t, http.StatusOK,
 		bindingsPost(t, h, `{"registration_id":1,"external_uid":"20240001","user_id":"weknora-u1"}`).Code)

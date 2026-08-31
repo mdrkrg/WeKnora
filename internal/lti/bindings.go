@@ -2,9 +2,11 @@ package lti
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/gin-gonic/gin"
 )
@@ -80,6 +82,27 @@ func (h *BindingsHandler) Create(c *gin.Context) {
 	}
 	if reg == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown registration"})
+		return
+	}
+
+	// Reject targets that can never complete a handoff (missing, suspended,
+	// tenantless). Tenantless fails hard on purpose: without workspace
+	// provisioning there is no usable LTI handoff.
+	user, err := h.catalog.GetUserByID(c.Request.Context(), req.UserID)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown user"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server error"})
+		return
+	}
+	if !user.IsActive {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "user inactive"})
+		return
+	}
+	if user.TenantID == 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "user has no workspace"})
 		return
 	}
 
