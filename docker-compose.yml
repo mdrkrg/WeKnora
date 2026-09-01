@@ -15,6 +15,13 @@ services:
       # For remote deployment, set this to the remote App's service port.
       - APP_PORT=${APP_BACKEND_PORT:-8080}
       - APP_SCHEME=${APP_SCHEME:-http}
+      # LTI 自托管 handoff：三项由前端入口脚本渲染 SPA 根的 frame 策略，
+      # LTI_ENABLE + LTI_SELF_HANDOFF_ENABLE 同时为 true 时，SPA 根以
+      # CSP frame-ancestors（取值同 LTI_FRAME_ANCESTORS）取代 X-Frame-Options，
+      # 允许平台 iframe 嵌套 handoff 落地页；默认行为不变（SAMEORIGIN）
+      - LTI_ENABLE=${LTI_ENABLE:-false}
+      - LTI_SELF_HANDOFF_ENABLE=${LTI_SELF_HANDOFF_ENABLE:-false}
+      - LTI_FRAME_ANCESTORS=${LTI_FRAME_ANCESTORS:-}
     # NOTE: If using a remote App backend, comment out or remove the depends_on
     # block below and set APP_HOST/APP_BACKEND_PORT/APP_SCHEME in your .env file.
     depends_on:
@@ -355,6 +362,17 @@ services:
       - OIDC_AUTH_SCOPES=${OIDC_AUTH_SCOPES:-}
       - OIDC_USER_INFO_MAPPING_USER_NAME=${OIDC_USER_INFO_MAPPING_USER_NAME:-}
       - OIDC_USER_INFO_MAPPING_EMAIL=${OIDC_USER_INFO_MAPPING_EMAIL:-}
+      # ========== LTI 1.3 认证（可选，LTI_ENABLE=true 启用，详见 .env.example）==========
+      - LTI_ENABLE=${LTI_ENABLE:-false}
+      - LTI_HANDOFF_URL=${LTI_HANDOFF_URL:-}
+      - LTI_HANDOFF_SHARED_SECRET=${LTI_HANDOFF_SHARED_SECRET:-}
+      - LTI_LAUNCH_URL=${LTI_LAUNCH_URL:-}
+      - LTI_FRAME_ANCESTORS=${LTI_FRAME_ANCESTORS:-}
+      - LTI_NONCE_MAX_AGE=${LTI_NONCE_MAX_AGE:-}
+      - LTI_TICKET_TTL=${LTI_TICKET_TTL:-}
+      - LTI_DIRECTORY_CLAIM=${LTI_DIRECTORY_CLAIM:-}
+      - LTI_SELF_HANDOFF_ENABLE=${LTI_SELF_HANDOFF_ENABLE:-false}
+      - LTI_PLACEHOLDER_DOMAIN=${LTI_PLACEHOLDER_DOMAIN:-}
       # 飞书云文档解析模式 export：导出为docx，blocks：根据飞书云文档块解析为markdown。默认为:export
       - FEISHU_DOCX_PARSE_MODE=${FEISHU_DOCX_PARSE_MODE:-export}
     depends_on:

@@ -1138,6 +1138,44 @@ func (s *userService) SwitchTenant(
 	}, nil
 }
 
+// IssueLTITokens mints an access/refresh pair for a user, used by the LTI
+// handoff exchange. When requireMembership is set the user must already be an
+// active member of tenantID; otherwise the user's home tenant is used.
+func (s *userService) IssueLTITokens(
+	ctx context.Context,
+	userID string,
+	tenantID uint64,
+	requireMembership bool,
+) (accessToken, refreshToken string, err error) {
+	user, err := s.userRepo.GetUserByID(ctx, userID)
+	if err != nil {
+		return "", "", err
+	}
+	target := tenantID
+	if tenantID == 0 {
+		if user.TenantID == 0 {
+			return "", "", errors.New("user has no tenant")
+		}
+		target = user.TenantID
+	} else if requireMembership {
+		if s.memberService == nil {
+			return "", "", errors.New("workspace membership service unavailable")
+		}
+		member, err := s.memberService.GetMembership(ctx, user.ID, target)
+		if err != nil {
+			return "", "", fmt.Errorf("lookup membership: %w", err)
+		}
+		if member == nil || member.Status != types.TenantMemberStatusActive {
+			return "", "", ErrMembershipNotFound
+		}
+	}
+	accessToken, refreshToken, err = s.generateTokensForTenant(ctx, user, target)
+	if err != nil {
+		return "", "", fmt.Errorf("generate tokens: %w", err)
+	}
+	return accessToken, refreshToken, nil
+}
+
 // ValidateToken validates an access token. The second return value is
 // the JWT's `tenant_id` claim — i.e. the tenant the token was minted
 // for, which may differ from user.TenantID after a /auth/switch-tenant
