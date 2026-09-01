@@ -406,6 +406,18 @@ func (s *DataSourceService) attachCredentialPersister(dsID string, config *types
 		return
 	}
 	config.OnCredentialsUpdated = func(ctx context.Context, credentials map[string]interface{}) error {
+		existing, err := s.dsRepo.FindByID(ctx, dsID)
+		if err != nil {
+			return err
+		}
+		if existing.Status == types.DataSourceStatusPaused {
+			// The datasource was paused after this sync started; keep paused a
+			// true freeze. Canvas refresh tokens are reusable, so the next run
+			// after resume refreshes from the stored token.
+			logger.Infof(ctx, "skip credential write-back for paused data source: id=%s",
+				secutils.SanitizeForLog(dsID))
+			return nil
+		}
 		return s.MergeDataSourceCredentials(ctx, dsID, credentials)
 	}
 	config.OnCredentialsReload = func(ctx context.Context) (map[string]interface{}, error) {
