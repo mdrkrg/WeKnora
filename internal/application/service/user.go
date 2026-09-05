@@ -1180,7 +1180,8 @@ func (s *userService) SwitchTenant(
 
 // IssueLTITokens mints an access/refresh pair for a user, used by the LTI
 // handoff exchange. When requireMembership is set the user must already be an
-// active member of tenantID; otherwise the user's home tenant is used.
+// active member of tenantID; otherwise the user's home tenant is used, with
+// the login path's tenantless self-heal (see resolveFirstMembershipTenant).
 func (s *userService) IssueLTITokens(
 	ctx context.Context,
 	userID string,
@@ -1193,10 +1194,16 @@ func (s *userService) IssueLTITokens(
 	}
 	target := tenantID
 	if tenantID == 0 {
-		if user.TenantID == 0 {
-			return "", "", ErrNoDefaultWorkspace
-		}
 		target = user.TenantID
+		if target == 0 {
+			// Tenantless user with memberships: heal like the login path
+			// (resolveFirstMembershipTenant, best-effort persisted home);
+			// ErrNoDefaultWorkspace stays the no-usable-membership terminal.
+			target = s.resolveFirstMembershipTenant(ctx, user)
+			if target == 0 {
+				return "", "", ErrNoDefaultWorkspace
+			}
+		}
 	} else if requireMembership {
 		if s.memberService == nil {
 			return "", "", errors.New("workspace membership service unavailable")
