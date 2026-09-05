@@ -323,6 +323,7 @@ func (h *Handler) Redeem(c *gin.Context) {
 	if req.TenantID != nil && *req.TenantID > 0 {
 		tokens, err = h.minter.IssueForTenant(c.Request.Context(), ticket.UserID, *req.TenantID)
 		if errors.Is(err, ErrNotTenantMember) {
+			h.restoreTicketAfterFailedRedemption(c.Request.Context(), req.Ticket)
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": "not a member of the target workspace",
 				"code":  "not_a_member",
@@ -332,6 +333,7 @@ func (h *Handler) Redeem(c *gin.Context) {
 	} else {
 		tokens, err = h.minter.IssueDefault(c.Request.Context(), ticket.UserID)
 		if errors.Is(err, ErrNoWorkspace) {
+			h.restoreTicketAfterFailedRedemption(c.Request.Context(), req.Ticket)
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": "user has no default workspace",
 				"code":  "no_workspace",
@@ -340,6 +342,7 @@ func (h *Handler) Redeem(c *gin.Context) {
 		}
 	}
 	if err != nil {
+		h.restoreTicketAfterFailedRedemption(c.Request.Context(), req.Ticket)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server error"})
 		return
 	}
@@ -365,6 +368,17 @@ func (h *Handler) Redeem(c *gin.Context) {
 		"access_token":  tokens.AccessToken,
 		"refresh_token": tokens.RefreshToken,
 	})
+}
+
+// restoreTicketAfterFailedRedemption hands a consumed ticket back after a
+// mint failure, so the same ticket can be retried. Best-effort, logged only.
+func (h *Handler) restoreTicketAfterFailedRedemption(ctx context.Context, raw string) {
+	if raw == "" {
+		return
+	}
+	if err := h.tickets.Restore(ctx, raw); err != nil {
+		logger.Warnf(ctx, "redeem: failed to restore ticket after mint failure: %v", err)
+	}
 }
 
 func (h *Handler) enabled() bool {
