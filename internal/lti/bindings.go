@@ -85,9 +85,11 @@ func (h *BindingsHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Reject targets that can never complete a handoff (missing, suspended,
-	// tenantless). Tenantless fails hard on purpose: without workspace
-	// provisioning there is no usable LTI handoff.
+	// Reject push targets that can never complete a handoff (missing,
+	// suspended, or still tenantless). A tenantless account holding an active
+	// membership can now redeem via the default-path self-heal
+	// (IssueLTITokens), so this 422 only bites until the account's home is
+	// settled; the daemon re-pushes once it is.
 	user, err := h.catalog.GetUserByID(c.Request.Context(), req.UserID)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
