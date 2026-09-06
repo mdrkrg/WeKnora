@@ -46,7 +46,8 @@ if [ "${LTI_ENABLE:-false}" = "true" ] && [ "${LTI_SELF_HANDOFF_ENABLE:-false}" 
 fi
 export SPA_XFRAME_OPTIONS SPA_FRAME_ANCESTORS
 
-envsubst '${MAX_FILE_SIZE} ${MAX_SKILL_BUNDLE_SIZE} ${APP_HOST} ${APP_PORT} ${APP_SCHEME} ${SPA_XFRAME_OPTIONS} ${SPA_FRAME_ANCESTORS}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+envsubst '${MAX_FILE_SIZE} ${MAX_SKILL_BUNDLE_SIZE} ${APP_HOST} ${APP_PORT} ${APP_SCHEME} ${SPA_XFRAME_OPTIONS} ${SPA_FRAME_ANCESTORS}' \
+  < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
 # 启动 nginx
 exec nginx -g 'daemon off;'

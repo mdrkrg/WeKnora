@@ -547,11 +547,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	}))
 	must(container.Provide(lti.NewVerifier))
 	must(container.Provide(lti.NewUserCatalog))
-	must(container.Provide(func(users lti.UserCatalog) lti.IdentityResolver {
-		return lti.NewEmailResolver(users)
+	must(container.Provide(lti.NewAuditSink))
+	must(container.Provide(func(
+		users lti.UserCatalog, cfg *config.LTIConfig,
+	) lti.IdentityResolver {
+		return lti.NewMatcher(users, cfg.PlaceholderDomain)
 	}))
 	must(container.Provide(lti.NewUserTokenMinter))
-	must(container.Provide(lti.NewAuditSink))
 	must(container.Provide(lti.NewHandler))
 	must(container.Invoke(startLTITicketCleanup))
 

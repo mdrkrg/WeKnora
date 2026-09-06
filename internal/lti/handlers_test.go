@@ -22,12 +22,10 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-func testLTIHandler(t *testing.T, deps *handlerDeps) *Handler {
-	t.Helper()
-	if deps == nil {
-		deps = &handlerDeps{}
-	}
-	cfg := &config.LTIConfig{
+// testLTIConfig returns the config the handler tests share: LTI enabled with a
+// placeholder external handoff URL. Callers override individual fields.
+func testLTIConfig() *config.LTIConfig {
+	return &config.LTIConfig{
 		Enable:         true,
 		HandoffURL:     "https://app.example.com/api/auth/lti/handoff",
 		LaunchURL:      "https://tool.example.com/lti/launch",
@@ -35,6 +33,21 @@ func testLTIHandler(t *testing.T, deps *handlerDeps) *Handler {
 		NonceMaxAge:    10 * time.Minute,
 		TicketTTL:      120 * time.Second,
 	}
+}
+
+// selfHandoffConfig is testLTIConfig with the built-in browser handoff enabled.
+func selfHandoffConfig() *config.LTIConfig {
+	cfg := testLTIConfig()
+	cfg.SelfHandoffEnable = true
+	return cfg
+}
+
+func testLTIHandler(t *testing.T, deps *handlerDeps) *Handler {
+	t.Helper()
+	if deps == nil {
+		deps = &handlerDeps{}
+	}
+	cfg := testLTIConfig()
 	if deps.cfg != nil {
 		cfg = deps.cfg
 	}
@@ -74,20 +87,6 @@ type handlerDeps struct {
 	resolver      IdentityResolver
 	minter        TokenMinter
 	audit         AuditSink
-}
-
-// selfHandoffConfig is the standard test config with the built-in browser
-// handoff enabled.
-func selfHandoffConfig() *config.LTIConfig {
-	return &config.LTIConfig{
-		Enable:            true,
-		HandoffURL:        "https://app.example.com/api/auth/lti/handoff",
-		LaunchURL:         "https://tool.example.com/lti/launch",
-		FrameAncestors:    "'self'",
-		NonceMaxAge:       10 * time.Minute,
-		TicketTTL:         120 * time.Second,
-		SelfHandoffEnable: true,
-	}
 }
 
 func postForm(t *testing.T, h *Handler, path string, values url.Values) *httptest.ResponseRecorder {
@@ -327,6 +326,14 @@ func TestLaunchAuditsTicketIssued(t *testing.T) {
 	require.Contains(t, details, `"context_id":"course-42"`)
 }
 
+func TestJWKSInertWhenDisabled(t *testing.T) {
+	h := testLTIHandler(t, &handlerDeps{cfg: &config.LTIConfig{Enable: false}})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	newTestEngine(h).ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
 // TestLaunchHandoffURLKeepsExistingQuery pins that a handoff URL which already
 // carries a query string is extended rather than corrupted to "?ticket=".
 func TestLaunchHandoffURLKeepsExistingQuery(t *testing.T) {
@@ -336,15 +343,10 @@ func TestLaunchHandoffURLKeepsExistingQuery(t *testing.T) {
 	require.NoError(t, err)
 	keys, err := p.Keyfunc()
 	require.NoError(t, err)
+	cfg := testLTIConfig()
+	cfg.HandoffURL = "https://app.example.com/h?foo=bar"
 	h := testLTIHandler(t, &handlerDeps{
-		cfg: &config.LTIConfig{
-			Enable:         true,
-			HandoffURL:     "https://app.example.com/h?foo=bar",
-			LaunchURL:      "https://tool.example.com/lti/launch",
-			NonceMaxAge:    10 * time.Minute,
-			TicketTTL:      120 * time.Second,
-			FrameAncestors: "'self'",
-		},
+		cfg:           cfg,
 		registrations: &fakeRegistrationStore{regs: []*Registration{baseRegistration("https://platform.example.com", "client-1")}},
 		verifier:      NewVerifier(&fakeKeysets{kf: keys}),
 		resolver:      &fakeResolver{res: &IdentityResolution{UserID: "weknora-user-1"}},
@@ -370,15 +372,7 @@ func TestHandoffDeliversSessionViaHash(t *testing.T) {
 		ContextID: "course-42",
 	}}
 	h := testLTIHandler(t, &handlerDeps{
-		cfg: &config.LTIConfig{
-			Enable:            true,
-			HandoffURL:        "https://app.example.com/api/auth/lti/handoff",
-			LaunchURL:         "https://tool.example.com/lti/launch",
-			FrameAncestors:    "'self'",
-			NonceMaxAge:       10 * time.Minute,
-			TicketTTL:         120 * time.Second,
-			SelfHandoffEnable: true,
-		},
+		cfg:     selfHandoffConfig(),
 		tickets: tickets,
 		minter:  minter,
 		audit:   audit,
@@ -411,15 +405,7 @@ func TestHandoffRedirectsErrorOnConsumedTicket(t *testing.T) {
 	audit := &fakeAuditSink{}
 	tickets := &fakeTicketService{consumeErr: ErrTicketConsumed}
 	h := testLTIHandler(t, &handlerDeps{
-		cfg: &config.LTIConfig{
-			Enable:            true,
-			HandoffURL:        "https://app.example.com/api/auth/lti/handoff",
-			LaunchURL:         "https://tool.example.com/lti/launch",
-			FrameAncestors:    "'self'",
-			NonceMaxAge:       10 * time.Minute,
-			TicketTTL:         120 * time.Second,
-			SelfHandoffEnable: true,
-		},
+		cfg:     selfHandoffConfig(),
 		tickets: tickets,
 		audit:   audit,
 	})
@@ -434,9 +420,7 @@ func TestHandoffRedirectsErrorOnConsumedTicket(t *testing.T) {
 }
 
 func TestHandoffMissingTicketRedirectsError(t *testing.T) {
-	h := testLTIHandler(t, &handlerDeps{
-		cfg: &config.LTIConfig{Enable: true, SelfHandoffEnable: true},
-	})
+	h := testLTIHandler(t, &handlerDeps{cfg: selfHandoffConfig()})
 	w := getHandoff(t, h, "")
 	require.Equal(t, http.StatusFound, w.Code)
 	require.Contains(t, w.Header().Get("Location"), "/#lti_error=missing_ticket")

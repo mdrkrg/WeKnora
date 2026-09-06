@@ -231,8 +231,10 @@ func (h *Handler) Launch(c *gin.Context) {
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrIdentityMisconfigured):
+			h.renderFailure(c, http.StatusBadRequest, "服务配置错误", "LTI 身份解析缺少学工号：自定义 claim 未注入或注册未配置 directory claim。请联系管理员。")
 		case errors.Is(err, ErrIdentityNotFound):
-			h.renderFailure(c, http.StatusBadRequest, "无匹配账号", "该邮箱未对应任何 WeKnora 账号，无法登录。")
+			h.renderFailure(c, http.StatusBadRequest, "账号未开通", "你的账号尚未开通，请联系管理员开通后再试。")
 		default:
 			h.renderFailure(c, http.StatusInternalServerError, "服务错误", "身份解析失败。")
 		}

@@ -14,8 +14,14 @@ var (
 	ErrTicketExpired = errors.New("lti: ticket expired")
 	// ErrTicketConsumed is returned when a single-use ticket was already used.
 	ErrTicketConsumed = errors.New("lti: ticket already consumed")
-	// ErrIdentityNotFound is returned when no existing WeKnora account matches
-	// the launch identity (e.g. an email-match resolver finds no user).
+	// ErrIdentityMisconfigured is returned when a launch carries no directory
+	// uid: the custom claim was not injected, the registration's directory_claim
+	// is unset, or the platform user has no SIS pseudonym. This is a deployment
+	// misconfiguration (unlike ErrIdentityNotFound), not a missing account.
+	ErrIdentityMisconfigured = errors.New("lti: launch is missing the directory uid claim")
+	// ErrIdentityNotFound is returned when no WeKnora account matches the
+	// launch identity: accounts are provisioned out-of-band and none exists
+	// for this user yet.
 	ErrIdentityNotFound = errors.New("lti: no matching account for the launch identity")
 	// ErrNoWorkspace is returned by the token minter when a resolved user has
 	// no home workspace, so a default-tenant issuance is impossible.

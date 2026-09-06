@@ -39,7 +39,7 @@ func (f *fakeAuditLogService) Purge(context.Context, int) (int64, error) {
 func TestAuditSinkForwards(t *testing.T) {
 	svc := &fakeAuditLogService{}
 	sink := NewAuditSink(svc)
-	entry := &types.AuditLog{Action: AuditActionLTITicketIssued}
+	entry := &types.AuditLog{Action: AuditActionLTITicketRedeemed}
 	require.NoError(t, sink.Log(context.Background(), entry))
 	require.Len(t, svc.entries, 1)
 	require.Equal(t, entry, svc.entries[0])

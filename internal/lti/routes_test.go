@@ -16,6 +16,7 @@ func TestRegisterPublicRoutesMountsLTIEndpoints(t *testing.T) {
 		"/lti/login_initiations": true,
 		"/lti/launch":            true,
 		"/.well-known/jwks.json": true,
+		"/lti/handoff":           true,
 	}
 	for _, rt := range r.Routes() {
 		if want[rt.Path] {
