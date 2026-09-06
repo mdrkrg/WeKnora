@@ -101,3 +101,21 @@ func TestApplyLTIEnvOverrides_SelfHandoff(t *testing.T) {
 		t.Fatal("LTI_SELF_HANDOFF_ENABLE=true should enable self-handoff")
 	}
 }
+
+// TestApplyLTIEnvOverrides_PlaceholderDomain pins the LTI_PLACEHOLDER_DOMAIN
+// default (RFC 2606 reserved) and override.
+func TestApplyLTIEnvOverrides_PlaceholderDomain(t *testing.T) {
+	t.Setenv("LTI_PLACEHOLDER_DOMAIN", "")
+	cfg := &Config{LTI: &LTIConfig{}}
+	applyLTIEnvOverrides(cfg)
+	if cfg.LTI.PlaceholderDomain != "users.lti.invalid" {
+		t.Fatalf("PlaceholderDomain = %q, want users.lti.invalid", cfg.LTI.PlaceholderDomain)
+	}
+
+	t.Setenv("LTI_PLACEHOLDER_DOMAIN", "lti.example.com")
+	cfg = &Config{LTI: &LTIConfig{}}
+	applyLTIEnvOverrides(cfg)
+	if cfg.LTI.PlaceholderDomain != "lti.example.com" {
+		t.Fatalf("PlaceholderDomain = %q, want lti.example.com", cfg.LTI.PlaceholderDomain)
+	}
+}

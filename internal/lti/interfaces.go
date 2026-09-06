@@ -53,8 +53,9 @@ type IdentityResolver interface {
 	Resolve(ctx context.Context, identity *LaunchIdentity) (*IdentityResolution, error)
 }
 
-// UserCatalog looks up WeKnora accounts by email; identity resolvers depend
-// on it to map a launch identity to an existing account.
+// UserCatalog looks up WeKnora accounts by email; the identity resolver uses it
+// to find the account whose deterministic email encodes the launch directory
+// uid.
 type UserCatalog interface {
 	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
 }
