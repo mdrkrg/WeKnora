@@ -8,6 +8,7 @@ import (
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
 type fakeKeysets struct {
@@ -117,6 +118,23 @@ type fakeMinter struct {
 func (f *fakeMinter) IssueDefault(_ context.Context, userID string) (*TokenResult, error) {
 	f.lastDefaultUID = userID
 	return f.defaultResult, f.defaultErr
+}
+
+// stubUserService stands in for *service.userService, implementing only the
+// IssueLTITokens slice the lazy minter assertion looks for. It is shared by the
+// minter unit test and the end-to-end flow test.
+type stubUserService struct {
+	interfaces.UserService
+	err error
+}
+
+func (s *stubUserService) IssueLTITokens(
+	context.Context, string, uint64,
+) (string, string, error) {
+	if s.err != nil {
+		return "", "", s.err
+	}
+	return "at-flow", "rt-flow", nil
 }
 
 type fakeTicketStore struct {

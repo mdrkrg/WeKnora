@@ -1,7 +1,6 @@
 package lti
 
 import (
-	"context"
 	"crypto/tls"
 	"errors"
 	"net/http"
@@ -9,7 +8,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/lti/ltitest"
@@ -104,14 +102,8 @@ func TestLaunchHandoffUnconfiguredRenders500(t *testing.T) {
 	require.NoError(t, err)
 	keys, err := p.Keyfunc()
 	require.NoError(t, err)
-	cfg := &config.LTIConfig{
-		Enable:         true,
-		HandoffURL:     "",
-		LaunchURL:      "https://tool.example.com/lti/launch",
-		FrameAncestors: "'self'",
-		NonceMaxAge:    10 * time.Minute,
-		TicketTTL:      120 * time.Second,
-	}
+	cfg := testLTIConfig()
+	cfg.HandoffURL = ""
 	h := testLTIHandler(t, &handlerDeps{
 		cfg: cfg,
 		registrations: &fakeRegistrationStore{
@@ -141,30 +133,3 @@ func TestJWKSCorruptPublicJWKRenders500(t *testing.T) {
 	newTestEngine(h).ServeHTTP(w, req)
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 }
-
-// flakyMinter fails the first N mint calls, then succeeds (transient outage).
-type flakyMinter struct {
-	remainingFailures int
-	firstErr          error
-	ok                *TokenResult
-}
-
-func (m *flakyMinter) issue() (*TokenResult, error) {
-	if m.remainingFailures > 0 {
-		m.remainingFailures--
-		return nil, m.firstErr
-	}
-	return m.ok, nil
-}
-
-func (m *flakyMinter) IssueDefault(context.Context, string) (*TokenResult, error) {
-	return m.issue()
-}
-
-func (m *flakyMinter) IssueForTenant(context.Context, string, uint64) (*TokenResult, error) {
-	return m.issue()
-}
-
-// Pins the redeem lifecycle: consume-first wins the single-use race, but a
-// mint failure must hand the ticket back so the same ticket redeems again
-// instead of a 409 lockout.

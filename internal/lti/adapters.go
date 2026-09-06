@@ -7,8 +7,23 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
+// NewAuditSink adapts the audit log service into the narrow AuditSink
+// contract. A nil audit service degrades to a no-op sink, keeping the LTI
+// package deployment-agnostic: deployments without an audit service boot and
+// run, they just don't emit audit rows.
+func NewAuditSink(svc interfaces.AuditLogService) AuditSink {
+	if svc == nil {
+		return nilSink{}
+	}
+	return svc
+}
+
+type nilSink struct{}
+
+func (nilSink) Log(context.Context, *types.AuditLog) error { return nil }
+
 // userCatalogAdapter is the narrow slice of the user service the identity
-// resolvers need (email lookup). It is satisfied by *service.userService via a
+// resolver needs (email lookup). It is satisfied by *service.userService via a
 // lazy type assertion.
 type userCatalogAdapter interface {
 	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
@@ -41,18 +56,3 @@ func (a *userCatalog) GetUserByEmail(ctx context.Context, email string) (*types.
 	}
 	return svc.GetUserByEmail(ctx, email)
 }
-
-// NewAuditSink adapts the audit log service into the narrow AuditSink
-// contract. A nil audit service degrades to a no-op sink, keeping the LTI
-// package deployment-agnostic: deployments without an audit service boot and
-// run, they just don't emit audit rows.
-func NewAuditSink(svc interfaces.AuditLogService) AuditSink {
-	if svc == nil {
-		return nilSink{}
-	}
-	return svc
-}
-
-type nilSink struct{}
-
-func (nilSink) Log(context.Context, *types.AuditLog) error { return nil }
