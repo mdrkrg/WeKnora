@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
+	"github.com/Tencent/WeKnora/internal/application/repository"
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
@@ -196,4 +197,19 @@ type fakeAuditSink struct {
 func (f *fakeAuditSink) Log(_ context.Context, entry *types.AuditLog) error {
 	f.entries = append(f.entries, entry)
 	return nil
+}
+
+type fakeUserCatalog struct {
+	byEmail map[string]*types.User
+	getErr  error
+}
+
+func (f *fakeUserCatalog) GetUserByEmail(_ context.Context, email string) (*types.User, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if u := f.byEmail[email]; u != nil {
+		return u, nil
+	}
+	return nil, repository.ErrUserNotFound
 }

@@ -17,6 +17,14 @@ var (
 	// ErrIdentityDisabled is returned by the placeholder identity resolver
 	// until a real one is wired in.
 	ErrIdentityDisabled = errors.New("lti: identity resolution not configured")
+	// ErrIdentityMisconfigured is returned when a launch carries no directory
+	// uid: the custom claim was not injected, the registration's directory_claim
+	// is unset, or the platform user has no SIS pseudonym. This is a deployment
+	// misconfiguration (unlike ErrIdentityNotFound), not a missing roster row.
+	ErrIdentityMisconfigured = errors.New("lti: launch is missing the directory uid claim")
+	// ErrIdentityNotFound is returned when no WeKnora account matches the
+	// launch identity: the roster sweep has not provisioned this user yet.
+	ErrIdentityNotFound = errors.New("lti: no matching account for the launch identity")
 	// ErrNotTenantMember is returned by the token minter when a resolved user
 	// has no membership in the requested tenant.
 	ErrNotTenantMember = errors.New("lti: user is not a member of the requested tenant")

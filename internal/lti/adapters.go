@@ -21,3 +21,38 @@ func NewAuditSink(svc interfaces.AuditLogService) AuditSink {
 type nilSink struct{}
 
 func (nilSink) Log(context.Context, *types.AuditLog) error { return nil }
+
+// userCatalogAdapter is the narrow slice of the user service the identity
+// resolver needs (email lookup). It is satisfied by *service.userService via a
+// lazy type assertion.
+type userCatalogAdapter interface {
+	GetUserByEmail(ctx context.Context, email string) (*types.User, error)
+}
+
+type userCatalog struct {
+	us interfaces.UserService
+}
+
+// NewUserCatalog adapts the user service into the narrow UserCatalog
+// contract. The interface is asserted lazily at call time, so a service that
+// stops exposing the method degrades to a per-request error instead of
+// failing to boot.
+func NewUserCatalog(us interfaces.UserService) UserCatalog {
+	return &userCatalog{us: us}
+}
+
+func (a *userCatalog) svc() (userCatalogAdapter, error) {
+	svc, ok := a.us.(userCatalogAdapter)
+	if !ok {
+		return nil, ErrUserServiceCapability
+	}
+	return svc, nil
+}
+
+func (a *userCatalog) GetUserByEmail(ctx context.Context, email string) (*types.User, error) {
+	svc, err := a.svc()
+	if err != nil {
+		return nil, err
+	}
+	return svc.GetUserByEmail(ctx, email)
+}
