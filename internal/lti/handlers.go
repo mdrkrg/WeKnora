@@ -18,9 +18,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Audit actions emitted by the protocol handlers. Defined package-locally
-// (following the lti.member_provisioned precedent) so the shell stays
-// deployment-agnostic and does not extend the platform's types package.
+// Audit actions emitted by the protocol handlers. Defined package-locally so
+// the shell stays deployment-agnostic and does not extend the platform's
+// types package.
 const (
 	// AuditActionLTITicketIssued fires when a launch resolves an account and
 	// a single-use ticket is minted.
@@ -233,8 +233,10 @@ func (h *Handler) Launch(c *gin.Context) {
 		switch {
 		case errors.Is(err, ErrIdentityDisabled):
 			h.renderFailure(c, http.StatusBadRequest, "暂不可用", "LTI 身份解析尚未配置。")
+		case errors.Is(err, ErrIdentityMisconfigured):
+			h.renderFailure(c, http.StatusBadRequest, "服务配置错误", "LTI 身份解析缺少学工号：自定义 claim 未注入或注册未配置 directory claim。请联系管理员。")
 		case errors.Is(err, ErrIdentityNotFound):
-			h.renderFailure(c, http.StatusBadRequest, "无匹配账号", "该邮箱未对应任何 WeKnora 账号，无法登录。")
+			h.renderFailure(c, http.StatusBadRequest, "名单尚未同步", "名单尚未同步，请稍后再试。")
 		default:
 			h.renderFailure(c, http.StatusInternalServerError, "服务错误", "身份解析失败。")
 		}
