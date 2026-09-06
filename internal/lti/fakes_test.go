@@ -210,11 +210,8 @@ func (f *fakeAuditSink) Log(_ context.Context, entry *types.AuditLog) error {
 }
 
 type fakeUserCatalog struct {
-	byEmail      map[string]*types.User
-	registerArgs []*types.RegisterRequest
-	registerErr  error
-	getErr       error
-	nextID       int
+	byEmail map[string]*types.User
+	getErr  error
 }
 
 func (f *fakeUserCatalog) GetUserByEmail(_ context.Context, email string) (*types.User, error) {
@@ -225,18 +222,4 @@ func (f *fakeUserCatalog) GetUserByEmail(_ context.Context, email string) (*type
 		return u, nil
 	}
 	return nil, repository.ErrUserNotFound
-}
-
-func (f *fakeUserCatalog) Register(_ context.Context, req *types.RegisterRequest) (*types.User, error) {
-	if f.registerErr != nil {
-		return nil, f.registerErr
-	}
-	f.registerArgs = append(f.registerArgs, req)
-	f.nextID++
-	user := &types.User{ID: "new-user-" + string(rune('0'+f.nextID)), Username: req.Username, Email: req.Email}
-	if f.byEmail == nil {
-		f.byEmail = map[string]*types.User{}
-	}
-	f.byEmail[req.Email] = user
-	return user, nil
 }
