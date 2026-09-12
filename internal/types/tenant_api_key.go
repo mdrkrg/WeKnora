@@ -162,6 +162,11 @@ const (
 	APIKeyCapabilitySystemRuntimeRead    APIKeyCapability = "system_runtime_read"
 	APIKeyCapabilitySystemRuntimeManage  APIKeyCapability = "system_runtime_manage"
 	APIKeyCapabilitySystemAuditRead      APIKeyCapability = "system_audit_read"
+	// APIKeyCapabilitySystemUsersManage lets a platform API key provision
+	// local user accounts via POST /system/admin/users/create. The
+	// generated-password response is still subject to the endpoint's
+	// security contract (returned once, never logged or audited).
+	APIKeyCapabilitySystemUsersManage APIKeyCapability = "system_users_manage"
 )
 
 // NormalizeAPIKeyCapability maps an input capability string to a known
@@ -218,6 +223,8 @@ func NormalizeAPIKeyCapability(c APIKeyCapability) APIKeyCapability {
 		return APIKeyCapabilitySystemRuntimeManage
 	case APIKeyCapabilitySystemAuditRead:
 		return APIKeyCapabilitySystemAuditRead
+	case APIKeyCapabilitySystemUsersManage:
+		return APIKeyCapabilitySystemUsersManage
 	default:
 		return ""
 	}

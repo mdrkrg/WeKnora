@@ -37,7 +37,8 @@ export default {
       settingsManage: 'Изменение настроек платформы.',
       runtimeRead: 'Просмотр очередей и задач.',
       runtimeManage: 'Повтор, запуск, отмена и удаление задач.',
-      auditRead: 'Чтение системного журнала аудита.'
+      auditRead: 'Чтение системного журнала аудита.',
+      usersManage: 'Создание локальных учетных записей через конечную точку создания пользователя.'
     },
     capabilities: {
       tenantsRead: 'Просмотр пространств',
@@ -46,7 +47,8 @@ export default {
       settingsManage: 'Управление системными настройками',
       runtimeRead: 'Просмотр очередей',
       runtimeManage: 'Управление очередями',
-      auditRead: 'Просмотр аудита'
+      auditRead: 'Просмотр аудита',
+      usersManage: 'Создание пользователей'
     }
   },
   tenantInvitation: {

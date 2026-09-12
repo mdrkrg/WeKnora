@@ -5961,7 +5961,8 @@ export default {
       settingsManage: 'Manage system settings',
       runtimeRead: 'Read runtime',
       runtimeManage: 'Manage runtime',
-      auditRead: 'Read system audit'
+      auditRead: 'Read system audit',
+      usersManage: 'Create users'
     },
     capabilityHints: {
       tenantsRead: 'List, search, and inspect every workspace.',
@@ -5970,7 +5971,8 @@ export default {
       settingsManage: 'Update and reset platform runtime settings.',
       runtimeRead: 'Inspect task queues and task details.',
       runtimeManage: 'Retry, run, cancel, or delete runtime tasks.',
-      auditRead: 'Read platform audit events.'
+      auditRead: 'Read platform audit events.',
+      usersManage: 'Provision local user accounts via the create-user endpoint.'
     },
     createdTitle: 'Platform API key created',
     createdDescription: 'Copy and store this key now. The full value will not be shown again.',
