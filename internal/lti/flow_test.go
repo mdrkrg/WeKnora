@@ -1,16 +1,36 @@
 package lti
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/application/service"
 	"github.com/Tencent/WeKnora/internal/lti/ltitest"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 )
+
+// flowUserService stands in for *service.userService: it implements the
+// IssueLTITokens slice the real minter adapts, so the full chain exercises the
+// real minter mapping (ErrMembershipNotFound -> ErrNotTenantMember).
+type flowUserService struct {
+	interfaces.UserService
+}
+
+func (s *flowUserService) IssueLTITokens(
+	_ context.Context, _ string, tenantID uint64, requireMembership bool,
+) (string, string, error) {
+	if requireMembership && tenantID == 999 {
+		return "", "", service.ErrMembershipNotFound
+	}
+	return "at-flow", "rt-flow", nil
+}
 
 // newFlowHandler wires the real protocol stack over real HTTP: the verifier
 // pulls the platform JWKS from ltitest's live endpoint, the ticket service is
@@ -39,7 +59,7 @@ func newFlowHandler(t *testing.T, selfHandoff bool) (*Handler, *ltitest.Platform
 		tickets:       NewTicketService(&fakeTicketStore{}, 120*time.Second),
 		verifier:      NewVerifier(NewKeysetResolver(regs, nil)),
 		resolver:      newTestMatcher(users),
-		minter:        NewUserTokenMinter(&stubUserService{}),
+		minter:        NewUserTokenMinter(&flowUserService{}),
 	}
 	if selfHandoff {
 		deps.cfg = selfHandoffConfig()
@@ -140,4 +160,117 @@ func TestFullLaunchSelfHandoffReplayRejected(t *testing.T) {
 	w = getHandoff(t, h, ticket)
 	require.Equal(t, http.StatusFound, w.Code)
 	require.Contains(t, w.Header().Get("Location"), "lti_error=invalid_ticket")
+}
+
+// TestFullLaunchToRedeemFlow walks the complete LTI 1.3 handshake over real
+// HTTP: 3rd-party initiation -> launch with a freshly signed id_token -> the
+// deterministic directory-key resolve -> ticket -> S2S redeem. The JWKS is
+// fetched live from the fake platform, so a regression anywhere in the chain
+// (state, verification, resolution, ticket, redeem) fails this test.
+func TestFullLaunchToRedeemFlow(t *testing.T) {
+	h, p := newFlowHandler(t, false)
+	ticket := completeLaunch(t, h, p)
+	require.NotEmpty(t, ticket)
+
+	w := redeemPost(t, h, "redeem-secret", `{"ticket":"`+ticket+`","tenant_id":7}`)
+	require.Equal(t, http.StatusOK, w.Code)
+	var body struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		UserID       string `json:"user_id"`
+		ContextID    string `json:"context_id"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, "at-flow", body.AccessToken)
+	require.Equal(t, "rt-flow", body.RefreshToken)
+	require.Equal(t, "weknora-user-1", body.UserID)
+	require.Equal(t, "course-42", body.ContextID)
+
+	// The ticket is single-use: a replay must fail with 409.
+	w = redeemPost(t, h, "redeem-secret", `{"ticket":"`+ticket+`"}`)
+	require.Equal(t, http.StatusConflict, w.Code)
+}
+
+// TestFullFlowNonMemberTenantRejected drives the same chain but redeems for a
+// tenant the user does not belong to; the real minter maps the service's
+// ErrMembershipNotFound to ErrNotTenantMember and the handler answers 403.
+func TestFullFlowNonMemberTenantRejected(t *testing.T) {
+	h, p := newFlowHandler(t, false)
+	ticket := completeLaunch(t, h, p)
+
+	w := redeemPost(t, h, "redeem-secret", `{"ticket":"`+ticket+`","tenant_id":999}`)
+	require.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// completeLaunchForClient drives the OIDC initiation and launch for a named
+// registration, returning the launch redirect target (where the ticket lands).
+func completeLaunchForClient(t *testing.T, h *Handler, p *ltitest.Platform, clientID string) string {
+	t.Helper()
+
+	w := postForm(t, h, "/lti/login_initiations", url.Values{
+		"iss":             {"https://platform.example.com"},
+		"client_id":       {clientID},
+		"login_hint":      {"platform-sub-uuid"},
+		"target_link_uri": {"https://tool.example.com/lti/launch"},
+	})
+	require.Equal(t, http.StatusFound, w.Code)
+	loc, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	state := loc.Query().Get("state")
+	nonce := loc.Query().Get("nonce")
+	require.NotEmpty(t, state)
+
+	tok := ltiClaims(p, func(m jwt.MapClaims) {
+		m["nonce"] = nonce
+		m["aud"] = clientID
+		m[ClaimCustom] = map[string]any{"sis_user_id": "20240001"}
+	})
+	w = postLaunch(t, h, tok, state)
+	require.Equal(t, http.StatusFound, w.Code)
+	return w.Header().Get("Location")
+}
+
+// TestFullMultiEntryHandoffRouting drives two registrations through one tool
+// instance: the course-navigation key carries its own handoff_url (external
+// web), the user-navigation key leaves it empty and falls back to the global
+// built-in browser handoff.
+func TestFullMultiEntryHandoffRouting(t *testing.T) {
+	setupSSRFWhitelist(t)
+	setupNonceEnv(t)
+	p := ltitest.NewPlatform(t)
+
+	key1 := baseRegistration("https://platform.example.com", "client-1")
+	key1.JWKSURI = p.JWKSURL()
+	key1.PublicKeyset = ""
+	key1.DirectoryClaim = "sis_user_id"
+	key1.HandoffURL = "https://web.example.com/api/auth/lti/handoff"
+
+	key2 := baseRegistration("https://platform.example.com", "client-2")
+	key2.ID = 2
+	key2.JWKSURI = p.JWKSURL()
+	key2.PublicKeyset = ""
+	key2.DirectoryClaim = "sis_user_id"
+	// key2.HandoffURL intentionally empty -> global fallback.
+
+	cfg := selfHandoffConfig()
+	cfg.HandoffURL = "https://weknora.example.com/lti/handoff"
+
+	regs := &fakeRegistrationStore{regs: []*Registration{key1, key2}}
+	users := &fakeUserCatalog{byEmail: map[string]*types.User{
+		"20240001@users.lti.invalid": {ID: "weknora-user-1"},
+	}}
+	h := testLTIHandler(t, &handlerDeps{
+		cfg:           cfg,
+		registrations: regs,
+		tickets:       NewTicketService(&fakeTicketStore{}, 120*time.Second),
+		verifier:      NewVerifier(NewKeysetResolver(regs, nil)),
+		resolver:      newTestMatcher(users),
+		minter:        NewUserTokenMinter(&flowUserService{}),
+	})
+
+	loc := completeLaunchForClient(t, h, p, "client-1")
+	require.Contains(t, loc, "https://web.example.com/api/auth/lti/handoff?ticket=")
+
+	loc = completeLaunchForClient(t, h, p, "client-2")
+	require.Contains(t, loc, "https://weknora.example.com/lti/handoff?ticket=")
 }
