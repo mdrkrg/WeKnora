@@ -13,3 +13,9 @@ func TestUserTokenMinterMapsNoDefaultWorkspace(t *testing.T) {
 	_, err := m.IssueDefault(context.Background(), "u1")
 	require.ErrorIs(t, err, ErrNoWorkspace)
 }
+
+func TestUserTokenMinterMapsMembershipNotFound(t *testing.T) {
+	m := NewUserTokenMinter(&stubUserService{err: service.ErrMembershipNotFound})
+	_, err := m.IssueForTenant(context.Background(), "u1", 7)
+	require.ErrorIs(t, err, ErrNotTenantMember)
+}
