@@ -72,14 +72,15 @@ func (f *fakeToolKeyStore) Ensure(_ context.Context) (*ToolKey, error) {
 }
 
 type fakeTicketService struct {
-	raw        string
-	issueErr   error
-	issueArgs  []string
-	issueRoles []string
-	consumeRes *Ticket
-	consumeErr error
-	deleteRes  int64
-	deleteErr  error
+	raw         string
+	issueErr    error
+	issueArgs   []string
+	issueRoles  []string
+	consumeRes  *Ticket
+	consumeErr  error
+	consumeHits int
+	deleteRes   int64
+	deleteErr   error
 }
 
 func (f *fakeTicketService) Issue(_ context.Context, userID, contextID string, roles []string) (string, error) {
@@ -89,6 +90,7 @@ func (f *fakeTicketService) Issue(_ context.Context, userID, contextID string, r
 }
 
 func (f *fakeTicketService) Consume(_ context.Context, _ string) (*Ticket, error) {
+	f.consumeHits++
 	return f.consumeRes, f.consumeErr
 }
 
