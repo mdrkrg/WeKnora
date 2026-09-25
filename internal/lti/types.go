@@ -30,10 +30,13 @@ type Registration struct {
 	PublicKeyset    string     `gorm:"type:text" json:"public_keyset"` // cached JWKS JSON
 	KeysetFetchedAt *time.Time `json:"keyset_fetched_at"`
 	// DirectoryClaim is the key inside the LTI custom claim carrying the directory uid.
-	DirectoryClaim string    `gorm:"type:varchar(128)" json:"directory_claim"`
-	Enabled        bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	DirectoryClaim string `gorm:"type:varchar(128)" json:"directory_claim"`
+	// HandoffURL optionally overrides the global LTI_HANDOFF_URL for launches
+	// resolved against this registration. Empty means "use the global default".
+	HandoffURL string    `gorm:"type:text" json:"handoff_url"`
+	Enabled    bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // TableName keeps the registration table name stable across backends.
