@@ -66,7 +66,6 @@ func TestVerifyValidToken(t *testing.T) {
 	require.Equal(t, "d1", got.DeploymentID)
 	require.Equal(t, "LtiResourceLinkRequest", got.MessageType)
 	require.Equal(t, "nonce-abc", got.Nonce)
-	require.Equal(t, "student@example.com", got.Email)
 	require.Equal(t, "20240001", got.DirectoryUID)
 	require.Len(t, got.Roles, 1)
 }

@@ -64,7 +64,6 @@ func TestMatcherIgnoresRealEmailClaim(t *testing.T) {
 		"student@example.com": {ID: "personal-account"},
 	}}
 	id := baseIdentity()
-	id.Email = "student@example.com"
 	_, err := newTestMatcher(users).Resolve(context.Background(), id)
 	require.ErrorIs(t, err, ErrIdentityNotFound)
 }
@@ -77,7 +76,6 @@ func TestMatcherDirectoryHitDespiteEmailClaim(t *testing.T) {
 		"student@example.com":        {ID: "personal-account"},
 	}}
 	id := baseIdentity()
-	id.Email = "student@example.com"
 	res, err := newTestMatcher(users).Resolve(context.Background(), id)
 	require.NoError(t, err)
 	require.Equal(t, "sis-account", res.UserID)

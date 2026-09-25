@@ -93,7 +93,6 @@ func (Ticket) TableName() string { return "lti_tickets" }
 type LaunchIdentity struct {
 	RegistrationID uint64
 	Sub            string
-	Email          string
 	DirectoryUID   string
 	Roles          []string
 }
@@ -120,6 +119,5 @@ type VerifiedToken struct {
 	DeploymentID string
 	ContextID    string
 	Roles        []string
-	Email        string
 	DirectoryUID string
 }

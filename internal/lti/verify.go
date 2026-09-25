@@ -79,7 +79,6 @@ func (v *Verifier) parse(
 	}
 
 	issuer, _ := claims["iss"].(string)
-	email, _ := claims["email"].(string)
 	return &VerifiedToken{
 		Sub:          sub,
 		Issuer:       issuer,
@@ -89,7 +88,6 @@ func (v *Verifier) parse(
 		DeploymentID: deployment,
 		ContextID:    contextIDFromClaims(claims),
 		Roles:        rolesFromClaims(claims),
-		Email:        email,
 		DirectoryUID: directoryUIDFromClaims(reg, claims),
 	}, nil
 }
