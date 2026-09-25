@@ -385,6 +385,7 @@ services:
       # ========== LTI 1.3 认证（可选，LTI_ENABLE=true 启用，详见 .env.example）==========
       - LTI_ENABLE=${LTI_ENABLE:-false}
       - LTI_HANDOFF_URL=${LTI_HANDOFF_URL:-}
+      - LTI_HANDOFF_SHARED_SECRET=${LTI_HANDOFF_SHARED_SECRET:-}
       - LTI_LAUNCH_URL=${LTI_LAUNCH_URL:-}
       - LTI_FRAME_ANCESTORS=${LTI_FRAME_ANCESTORS:-}
       - LTI_NONCE_MAX_AGE=${LTI_NONCE_MAX_AGE:-}
