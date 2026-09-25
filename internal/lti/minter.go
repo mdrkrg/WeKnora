@@ -48,3 +48,18 @@ func (m *userTokenMinter) IssueDefault(ctx context.Context, userID string) (*Tok
 	}
 	return &TokenResult{AccessToken: access, RefreshToken: refresh}, nil
 }
+
+func (m *userTokenMinter) IssueForTenant(ctx context.Context, userID string, tenantID uint64) (*TokenResult, error) {
+	svc, err := m.svc()
+	if err != nil {
+		return nil, err
+	}
+	access, refresh, err := svc.IssueLTITokens(ctx, userID, tenantID)
+	if err != nil {
+		if errors.Is(err, service.ErrMembershipNotFound) {
+			return nil, ErrNotTenantMember
+		}
+		return nil, err
+	}
+	return &TokenResult{AccessToken: access, RefreshToken: refresh}, nil
+}
