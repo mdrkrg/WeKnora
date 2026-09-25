@@ -324,13 +324,12 @@ type OIDCAuthConfig struct {
 // LTIConfig holds LTI 1.3 tool-side settings. Sourced from the LTI_* env
 // group at startup (see applyLTIEnvOverrides).
 type LTIConfig struct {
-	Enable              bool          `yaml:"enable"                json:"enable"`
-	HandoffURL          string        `yaml:"handoff_url"           json:"handoff_url"`
-	HandoffSharedSecret string        `yaml:"handoff_shared_secret" json:"-"`
-	LaunchURL           string        `yaml:"launch_url"            json:"launch_url"`
-	FrameAncestors      string        `yaml:"frame_ancestors"       json:"frame_ancestors"`
-	NonceMaxAge         time.Duration `yaml:"nonce_max_age"         json:"nonce_max_age"`
-	TicketTTL           time.Duration `yaml:"ticket_ttl"            json:"ticket_ttl"`
+	Enable         bool          `yaml:"enable"                json:"enable"`
+	HandoffURL     string        `yaml:"handoff_url"           json:"handoff_url"`
+	LaunchURL      string        `yaml:"launch_url"            json:"launch_url"`
+	FrameAncestors string        `yaml:"frame_ancestors"       json:"frame_ancestors"`
+	NonceMaxAge    time.Duration `yaml:"nonce_max_age"         json:"nonce_max_age"`
+	TicketTTL      time.Duration `yaml:"ticket_ttl"            json:"ticket_ttl"`
 	// SelfHandoffEnable exposes GET /lti/handoff, which lets a deployment use
 	// WeKnora itself as the launch handoff target: the browser exchanges the
 	// ticket for a session and is redirected into the SPA through the URL hash
@@ -793,9 +792,6 @@ func applyLTIEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("LTI_HANDOFF_URL")); value != "" {
 		cfg.LTI.HandoffURL = value
-	}
-	if value := strings.TrimSpace(os.Getenv("LTI_HANDOFF_SHARED_SECRET")); value != "" {
-		cfg.LTI.HandoffSharedSecret = value
 	}
 	if value := strings.TrimSpace(os.Getenv("LTI_LAUNCH_URL")); value != "" {
 		cfg.LTI.LaunchURL = value

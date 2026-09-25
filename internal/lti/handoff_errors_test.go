@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/require"
 )
@@ -16,16 +15,7 @@ import (
 func handoffHandler(t *testing.T, tickets TicketService, minter TokenMinter, audit AuditSink) *Handler {
 	t.Helper()
 	return testLTIHandler(t, &handlerDeps{
-		cfg: &config.LTIConfig{
-			Enable:              true,
-			HandoffURL:          "https://app.example.com/api/auth/lti/handoff",
-			HandoffSharedSecret: "redeem-secret",
-			LaunchURL:           "https://tool.example.com/lti/launch",
-			FrameAncestors:      "'self'",
-			NonceMaxAge:         10 * time.Minute,
-			TicketTTL:           120 * time.Second,
-			SelfHandoffEnable:   true,
-		},
+		cfg:     selfHandoffConfig(),
 		tickets: tickets,
 		minter:  minter,
 		audit:   audit,

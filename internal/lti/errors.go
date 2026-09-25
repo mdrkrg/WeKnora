@@ -17,6 +17,9 @@ var (
 	// ErrIdentityDisabled is returned by the placeholder identity resolver
 	// until a real one is wired in.
 	ErrIdentityDisabled = errors.New("lti: identity resolution not configured")
+	// ErrIdentityNotFound is returned when no existing WeKnora account matches
+	// the launch identity (e.g. an email-match resolver finds no user).
+	ErrIdentityNotFound = errors.New("lti: no matching account for the launch identity")
 	// ErrNoWorkspace is returned by the token minter when a resolved user has
 	// no home workspace, so a default-tenant issuance is impossible.
 	ErrNoWorkspace = errors.New("lti: user has no default workspace")
@@ -42,12 +45,10 @@ var (
 	ErrIDTokenMissingNonce = errors.New("lti: id_token missing nonce")
 	// ErrIDTokenMissingMessageType is returned when an id_token lacks the message_type claim.
 	ErrIDTokenMissingMessageType = errors.New("lti: id_token missing message_type")
-	// ErrIDTokenMissingDeploymentID is returned when an id_token lacks the deployment_id claim.
+	// ErrIDTokenMissingDeploymentID is returned when a registration pins a
+	// deployment allowlist but the id_token carries no deployment_id claim.
 	ErrIDTokenMissingDeploymentID = errors.New("lti: id_token missing deployment_id")
 	// ErrTokenMinterDisabled is returned by the default token minter until a
 	// real one is wired in.
 	ErrTokenMinterDisabled = errors.New("lti: token minting not configured")
-	// ErrNotTenantMember is returned by the token minter when a resolved user
-	// has no membership in the requested tenant.
-	ErrNotTenantMember = errors.New("lti: user is not a member of the requested tenant")
 )
