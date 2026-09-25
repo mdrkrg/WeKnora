@@ -119,3 +119,22 @@ func TestApplyLTIEnvOverrides_PlaceholderDomain(t *testing.T) {
 		t.Fatalf("PlaceholderDomain = %q, want lti.example.com", cfg.LTI.PlaceholderDomain)
 	}
 }
+
+// TestApplyLTIEnvOverrides_HandoffSharedSecret pins the S2S redeem secret: it
+// is empty by default (redeem refuses) and sourced from
+// LTI_HANDOFF_SHARED_SECRET when set.
+func TestApplyLTIEnvOverrides_HandoffSharedSecret(t *testing.T) {
+	t.Setenv("LTI_HANDOFF_SHARED_SECRET", "")
+	cfg := &Config{LTI: &LTIConfig{}}
+	applyLTIEnvOverrides(cfg)
+	if cfg.LTI.HandoffSharedSecret != "" {
+		t.Fatalf("HandoffSharedSecret = %q, want empty", cfg.LTI.HandoffSharedSecret)
+	}
+
+	t.Setenv("LTI_HANDOFF_SHARED_SECRET", "redeem-secret")
+	cfg = &Config{LTI: &LTIConfig{}}
+	applyLTIEnvOverrides(cfg)
+	if cfg.LTI.HandoffSharedSecret != "redeem-secret" {
+		t.Fatalf("HandoffSharedSecret = %q, want redeem-secret", cfg.LTI.HandoffSharedSecret)
+	}
+}
