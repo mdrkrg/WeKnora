@@ -112,12 +112,20 @@ func (f *fakeResolver) Resolve(_ context.Context, _ *LaunchIdentity) (*IdentityR
 type fakeMinter struct {
 	defaultResult  *TokenResult
 	defaultErr     error
+	forTenantRes   *TokenResult
+	forTenantErr   error
+	lastTenantID   uint64
 	lastDefaultUID string
 }
 
 func (f *fakeMinter) IssueDefault(_ context.Context, userID string) (*TokenResult, error) {
 	f.lastDefaultUID = userID
 	return f.defaultResult, f.defaultErr
+}
+
+func (f *fakeMinter) IssueForTenant(_ context.Context, _ string, tenantID uint64) (*TokenResult, error) {
+	f.lastTenantID = tenantID
+	return f.forTenantRes, f.forTenantErr
 }
 
 // stubUserService stands in for *service.userService, implementing only the
