@@ -262,7 +262,7 @@ func (h *Handler) Launch(c *gin.Context) {
 			"context_id": vt.ContextID,
 		}),
 	})
-	handoff := strings.TrimSpace(h.cfg.HandoffURL)
+	handoff := h.handoffTarget(reg)
 	if handoff == "" {
 		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "未配置 handoff 地址。")
 		return
@@ -509,6 +509,22 @@ func (h *Handler) redirectLTIError(c *gin.Context, code string) {
 
 func (h *Handler) enabled() bool {
 	return h.cfg != nil && h.cfg.Enable
+}
+
+// handoffTarget resolves where a launch is handed off: the registration's
+// HandoffURL when set, otherwise the global LTI_HANDOFF_URL. This lets one
+// instance serve different placements differently (e.g. course navigation to
+// an external web app, user navigation to the built-in browser handoff).
+func (h *Handler) handoffTarget(reg *Registration) string {
+	if reg != nil {
+		if override := strings.TrimSpace(reg.HandoffURL); override != "" {
+			return override
+		}
+	}
+	if h.cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.cfg.HandoffURL)
 }
 
 // launchURL returns the tool's own launch endpoint, from config when set and
