@@ -65,9 +65,10 @@ var versionedSQLiteColumns = map[string][]string{
 	"tenant_user_env_vars": {
 		"principal_type", "principal_id", "sandbox_config_id", "skill_id", "name", "value",
 	}, // 000028
+	"lti_registrations": {"handoff_url"}, // 000113
 }
 
-const expectedSQLiteMigrationVersion = 32
+const expectedSQLiteMigrationVersion = 33
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)
