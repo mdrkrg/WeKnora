@@ -172,6 +172,8 @@ const ltiErrorMessage = (code: string | null) => {
       return '登录服务暂时不可用，请稍后重试。'
     case 'no_workspace':
       return '账号尚未关联工作区，请联系管理员。'
+    case 'not_a_member':
+      return '您不是该工作区的成员，无法登录。'
     default:
       return code ? `LTI 登录失败（${code}）` : ''
   }
