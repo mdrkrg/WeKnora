@@ -114,6 +114,40 @@ func TestVerifyAllowsAnyDeploymentWhenListEmpty(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// Some platforms omit the deployment_id claim; without an allowlist that must
+// not fail the launch (the claim would carry no admission decision anyway).
+func TestVerifyAllowsMissingDeploymentWhenListEmpty(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	kf, err := p.Keyfunc()
+	require.NoError(t, err)
+	reg := baseRegistration("https://platform.example.com", "client-1")
+	reg.DeploymentIDs = ""
+	v := NewVerifier(&fakeKeysets{kf: kf})
+
+	tok := ltiClaims(p, func(m jwt.MapClaims) {
+		delete(m, ClaimDeploymentID)
+	})
+	got, err := v.Verify(context.Background(), tok, reg)
+	require.NoError(t, err)
+	require.Empty(t, got.DeploymentID)
+}
+
+// With an allowlist configured the claim is the only possible admission
+// decision, so its absence is rejected.
+func TestVerifyRejectsMissingDeploymentWhenListConfigured(t *testing.T) {
+	p := ltitest.NewPlatform(t)
+	kf, err := p.Keyfunc()
+	require.NoError(t, err)
+	reg := baseRegistration("https://platform.example.com", "client-1")
+	v := NewVerifier(&fakeKeysets{kf: kf})
+
+	tok := ltiClaims(p, func(m jwt.MapClaims) {
+		delete(m, ClaimDeploymentID)
+	})
+	_, err = v.Verify(context.Background(), tok, reg)
+	require.ErrorIs(t, err, ErrIDTokenMissingDeploymentID)
+}
+
 // The manual RS256 check duplicates jwt.WithValidMethods; kept as defense in depth.
 func TestVerifyRejectsWrongAlgorithm(t *testing.T) {
 	p := ltitest.NewPlatform(t)

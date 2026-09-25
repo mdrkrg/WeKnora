@@ -74,9 +74,6 @@ func (v *Verifier) parse(
 		return nil, ErrIDTokenMissingMessageType
 	}
 	deployment, _ := claims[ClaimDeploymentID].(string)
-	if deployment == "" {
-		return nil, ErrIDTokenMissingDeploymentID
-	}
 	if err := checkDeploymentAllowed(reg.DeploymentIDs, deployment); err != nil {
 		return nil, err
 	}
@@ -98,11 +95,19 @@ func (v *Verifier) parse(
 }
 
 func checkDeploymentAllowed(rawList, deployment string) error {
-	if strings.TrimSpace(rawList) == "" {
-		return nil // empty list means any deployment is allowed
+	list := strings.TrimSpace(rawList)
+	if list == "" {
+		// An empty allowlist deliberately admits any deployment. Some
+		// platforms (and older Canvas builds) omit the deployment_id claim,
+		// so an absent claim is tolerated when no allowlist is configured.
+		return nil
+	}
+	if deployment == "" {
+		// With an allowlist configured the claim is required to match it.
+		return ErrIDTokenMissingDeploymentID
 	}
 	var ids []string
-	if err := json.Unmarshal([]byte(rawList), &ids); err != nil {
+	if err := json.Unmarshal([]byte(list), &ids); err != nil {
 		return fmt.Errorf("lti: invalid deployment_ids: %w", err)
 	}
 	for _, id := range ids {

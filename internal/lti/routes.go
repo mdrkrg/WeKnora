@@ -10,6 +10,5 @@ func RegisterPublicRoutes(r *gin.Engine, h *Handler) {
 	r.POST("/lti/login_initiations", h.LoginInitiation)
 	r.POST("/lti/launch", h.Launch)
 	r.GET("/.well-known/jwks.json", h.JWKS)
-	r.POST("/lti/tickets/redeem", h.Redeem)
 	r.GET("/lti/handoff", h.Handoff)
 }

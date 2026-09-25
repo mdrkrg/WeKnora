@@ -60,11 +60,10 @@ type UserCatalog interface {
 	Register(ctx context.Context, req *types.RegisterRequest) (*types.User, error)
 }
 
-// TokenMinter mints the session JWT pair for a resolved user, either for their
-// default tenant or for an explicitly targeted tenant (with membership check).
+// TokenMinter mints the session JWT pair for a resolved user in their default
+// (home) workspace.
 type TokenMinter interface {
 	IssueDefault(ctx context.Context, userID string) (*TokenResult, error)
-	IssueForTenant(ctx context.Context, userID string, tenantID uint64) (*TokenResult, error)
 }
 
 // AuditSink records security-relevant LTI events (launch ticket issuance and

@@ -14,8 +14,6 @@ func TestDisabledTokenMinterRejects(t *testing.T) {
 	m := NewDisabledTokenMinter()
 	_, err := m.IssueDefault(context.Background(), "u1")
 	require.ErrorIs(t, err, ErrTokenMinterDisabled)
-	_, err = m.IssueForTenant(context.Background(), "u1", 1)
-	require.ErrorIs(t, err, ErrTokenMinterDisabled)
 }
 
 func TestDisabledIdentityResolverRejects(t *testing.T) {
