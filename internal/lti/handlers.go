@@ -2,6 +2,7 @@ package lti
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -298,6 +299,97 @@ func (h *Handler) JWKS(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"keys": []json.RawMessage{jwk}})
 }
 
+// Redeem exchanges a single-use ticket for a session JWT pair, optionally
+// targeted at a specific tenant (POST /lti/tickets/redeem).
+func (h *Handler) Redeem(c *gin.Context) {
+	if !h.validSharedSecret(c.GetHeader("Authorization")) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		Ticket   string  `json:"ticket"`
+		TenantID *uint64 `json:"tenant_id,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Ticket == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	ticket, err := h.tickets.Consume(c.Request.Context(), req.Ticket)
+	if err != nil {
+		reason := "expired_or_unknown"
+		switch {
+		case errors.Is(err, ErrTicketConsumed):
+			reason = "consumed"
+			c.JSON(http.StatusConflict, gin.H{"error": "ticket already used"})
+		case errors.Is(err, ErrTicketExpired), errors.Is(err, ErrTicketNotFound):
+			c.JSON(http.StatusGone, gin.H{"error": "ticket invalid or expired"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "server error"})
+			return
+		}
+		h.emitAudit(c.Request.Context(), &types.AuditLog{
+			Action:        AuditActionLTITicketRedeemDenied,
+			RequestPath:   c.Request.URL.Path,
+			RequestMethod: c.Request.Method,
+			Outcome:       types.AuditOutcomeDenied,
+			Details: auditDetailsJSON(map[string]any{
+				"reason": reason,
+			}),
+		})
+		return
+	}
+
+	var tokens *TokenResult
+	if req.TenantID != nil && *req.TenantID > 0 {
+		tokens, err = h.minter.IssueForTenant(c.Request.Context(), ticket.UserID, *req.TenantID)
+		if errors.Is(err, ErrNotTenantMember) {
+			h.restoreTicketAfterFailedRedemption(c.Request.Context(), req.Ticket)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "not a member of the target workspace",
+				"code":  "not_a_member",
+			})
+			return
+		}
+	} else {
+		tokens, err = h.minter.IssueDefault(c.Request.Context(), ticket.UserID)
+		if errors.Is(err, ErrNoWorkspace) {
+			h.restoreTicketAfterFailedRedemption(c.Request.Context(), req.Ticket)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "user has no default workspace",
+				"code":  "no_workspace",
+			})
+			return
+		}
+	}
+	if err != nil {
+		h.restoreTicketAfterFailedRedemption(c.Request.Context(), req.Ticket)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server error"})
+		return
+	}
+
+	details := map[string]any{"context_id": ticket.ContextID}
+	if req.TenantID != nil {
+		details["tenant_id"] = *req.TenantID
+	}
+	h.emitAudit(c.Request.Context(), &types.AuditLog{
+		Action:        AuditActionLTITicketRedeemed,
+		ActorUserID:   ticket.UserID,
+		TargetType:    "lti_ticket",
+		RequestPath:   c.Request.URL.Path,
+		RequestMethod: c.Request.Method,
+		Outcome:       types.AuditOutcomeSuccess,
+		Details:       auditDetailsJSON(details),
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id":       ticket.UserID,
+		"context_id":    ticket.ContextID,
+		"roles":         ticket.Roles,
+		"access_token":  tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+	})
+}
+
 // restoreTicketAfterFailedRedemption hands a consumed ticket back after a
 // mint failure, so the same ticket can be retried. Best-effort, logged only.
 func (h *Handler) restoreTicketAfterFailedRedemption(ctx context.Context, raw string) {
@@ -311,9 +403,10 @@ func (h *Handler) restoreTicketAfterFailedRedemption(ctx context.Context, raw st
 
 // Handoff exchanges a launch ticket for a session JWT pair and delivers it to
 // the SPA through the URL hash, mirroring the OIDC callback channel
-// (GET /lti/handoff). The ticket itself is the bearer credential (single-use,
-// short TTL, HTTPS-only), so no shared secret is involved; equivalent strength
-// to an OIDC code. The endpoint is inert unless LTI_SELF_HANDOFF_ENABLE is set.
+// (GET /lti/handoff). It is the browser-side counterpart of Redeem: the ticket
+// itself is the bearer credential (single-use, short TTL, HTTPS-only), so no
+// shared secret is involved; equivalent strength to an OIDC code. The endpoint
+// is inert unless LTI_SELF_HANDOFF_ENABLE is set.
 func (h *Handler) Handoff(c *gin.Context) {
 	if !h.enabled() || h.cfg == nil || !h.cfg.SelfHandoffEnable {
 		c.Status(http.StatusNotFound)
@@ -357,6 +450,8 @@ func (h *Handler) Handoff(c *gin.Context) {
 		switch {
 		case errors.Is(err, ErrNoWorkspace):
 			reason = "no_workspace"
+		case errors.Is(err, ErrNotTenantMember):
+			reason = "not_a_member"
 		}
 		h.emitAudit(c.Request.Context(), &types.AuditLog{
 			Action:        AuditActionLTITicketRedeemDenied,
@@ -433,6 +528,24 @@ func (h *Handler) launchURL(c *gin.Context) string {
 		}
 	}
 	return scheme + "://" + c.Request.Host + "/lti/launch"
+}
+
+// validSharedSecret does a constant-time comparison of the Bearer header
+// against the configured handoff shared secret.
+func (h *Handler) validSharedSecret(header string) bool {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	cfg := ""
+	if h.cfg != nil {
+		cfg = h.cfg.HandoffSharedSecret
+	}
+	if cfg == "" || token == "" || len(cfg) != len(token) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cfg), []byte(token)) == 1
 }
 
 func (h *Handler) renderFailure(c *gin.Context, status int, title, detail string) {

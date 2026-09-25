@@ -25,6 +25,9 @@ var (
 	// ErrIdentityNotFound is returned when no WeKnora account matches the
 	// launch identity: the roster sweep has not provisioned this user yet.
 	ErrIdentityNotFound = errors.New("lti: no matching account for the launch identity")
+	// ErrNotTenantMember is returned by the token minter when a resolved user
+	// has no membership in the requested tenant.
+	ErrNotTenantMember = errors.New("lti: user is not a member of the requested tenant")
 	// ErrNoWorkspace is returned by the token minter when a resolved user has
 	// no home workspace, so a default-tenant issuance is impossible.
 	ErrNoWorkspace = errors.New("lti: user has no default workspace")
