@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin, NotifyPlugin } from 'tdesign-vue-next'
+import ProtectedResourcePreview from '@/components/ProtectedResourcePreview.vue'
 import ManualKnowledgeEditor from '@/components/manual-knowledge-editor.vue'
 import UploadConfirmHost from '@/components/UploadConfirmHost.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -17,6 +18,7 @@ import { renderWorkspaceNotifyContent } from '@/utils/workspaceNotifyContent'
 import enUSConfig from 'tdesign-vue-next/esm/locale/en_US'
 import zhCNConfig from 'tdesign-vue-next/esm/locale/zh_CN'
 import koKRConfig from 'tdesign-vue-next/esm/locale/ko_KR'
+import jaJPConfig from 'tdesign-vue-next/esm/locale/ja_JP'
 import ruRUConfig from 'tdesign-vue-next/esm/locale/ru_RU'
 
 const { locale, t, tm } = useI18n()
@@ -29,6 +31,7 @@ const tdLocaleMap: Record<string, object> = {
   'en-US': enUSConfig,
   'zh-CN': zhCNConfig,
   'ko-KR': koKRConfig,
+  'ja-JP': jaJPConfig,
   'ru-RU': ruRUConfig,
 }
 
@@ -105,6 +108,19 @@ const persistOIDCLoginResponse = async (response: any) => {
 
   await syncOIDCUserContext()
 
+  // OIDC 跳转前暂存的邀请 token：拿到会话后兑换并进入对应空间。
+  const pendingInviteToken = sessionStorage.getItem('weknora_pending_invite_token')
+  if (pendingInviteToken) {
+    sessionStorage.removeItem('weknora_pending_invite_token')
+    const result = await authStore.acceptInvitationByTokenAndRefresh(pendingInviteToken)
+    await nextTick()
+    if (result.ok) MessagePlugin.success(t('inviteRegister.joined'))
+    else MessagePlugin.warning(t('inviteRegister.invalidBody'))
+    // 会话已有效，无论 token 是否兑换成功都进入应用。
+    router.replace('/platform/knowledge-bases')
+    return
+  }
+
   await nextTick()
   router.replace(authStore.hasValidTenant ? '/platform/knowledge-bases' : '/onboarding/workspace')
 }
@@ -117,25 +133,33 @@ const handleGlobalOIDCCallback = async () => {
   const oidcError = params.get('oidc_error')
   const oidcErrorDescription = params.get('oidc_error_description')
   const oidcResult = params.get('oidc_result')
+  // LTI self-handoff mirrors the OIDC channel: #lti_result=<base64url(JSON)>
+  // on success, #lti_error=<code> on failure.
+  const ltiError = params.get('lti_error')
+  const ltiResult = params.get('lti_result')
 
-  if (!oidcError && !oidcResult) return
+  const result = oidcResult || ltiResult
+  const error = oidcError || ltiError
+  const errorMessage = oidcErrorDescription || ltiErrorMessage(ltiError)
 
-  if (oidcError) {
+  if (!error && !result) return
+
+  if (error) {
     clearOIDCCallbackState('/login')
     await router.replace('/login')
-    MessagePlugin.error(oidcErrorDescription || 'OIDC login failed')
+    MessagePlugin.error(errorMessage || 'OIDC login failed')
     return
   }
 
   try {
-    if (!oidcResult) {
+    if (!result) {
       clearOIDCCallbackState('/login')
       await router.replace('/login')
       MessagePlugin.error('OIDC login failed')
       return
     }
 
-    const response = decodeOIDCResult(oidcResult)
+    const response = decodeOIDCResult(result)
     if (response.success) {
       clearOIDCCallbackState('/')
       await persistOIDCLoginResponse(response)
@@ -152,6 +176,20 @@ const handleGlobalOIDCCallback = async () => {
     clearOIDCCallbackState('/login')
     await router.replace('/login')
     MessagePlugin.error(error.message || 'OIDC login failed')
+  }
+}
+
+const ltiErrorMessage = (code: string | null) => {
+  switch (code) {
+    case 'missing_ticket':
+    case 'invalid_ticket':
+      return '登录凭证已失效，请从课程入口重新进入。'
+    case 'server_error':
+      return '登录服务暂时不可用，请稍后重试。'
+    case 'no_workspace':
+      return '账号尚未关联工作区，请联系管理员。'
+    default:
+      return code ? `LTI 登录失败（${code}）` : ''
   }
 }
 
@@ -262,6 +300,7 @@ onUnmounted(() => {
     <div id="app">
       <RouterView />
       <ManualKnowledgeEditor />
+      <ProtectedResourcePreview />
       <UploadConfirmHost />
     </div>
   </t-config-provider>

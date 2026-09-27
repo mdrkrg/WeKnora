@@ -7,16 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/application/service"
+	"github.com/Tencent/WeKnora/internal/embedpolicy"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/middleware"
+	"github.com/Tencent/WeKnora/internal/storageurl"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
@@ -90,38 +91,27 @@ func stringOrEmpty(v *string) string {
 	return *v
 }
 
-// validateAllowedOrigins enforces that a public embed channel declares an
-// explicit origin allowlist. An empty list means "allow any origin" in the
-// auth middleware, which is unsafe for a publicly reachable widget, so it is
-// rejected. In production a wildcard ("*") is also rejected; each entry must be
-// a well-formed http(s) origin (optionally a "*." subdomain wildcard).
+// validateAllowedOrigins validates host-page origins before using them in CSP.
 func validateAllowedOrigins(origins []string) error {
-	cleaned := make([]string, 0, len(origins))
-	for _, o := range origins {
-		o = strings.TrimSpace(o)
-		if o == "" {
-			continue
-		}
-		cleaned = append(cleaned, o)
-	}
-	if len(cleaned) == 0 {
+	if len(origins) == 0 {
 		return fmt.Errorf("at least one allowed origin is required")
 	}
-	for _, o := range cleaned {
-		if o == "*" {
-			if isProductionMode() {
-				return fmt.Errorf("wildcard origin '*' is not allowed in production")
-			}
+	count := 0
+	for _, raw := range origins {
+		if strings.TrimSpace(raw) == "" {
 			continue
 		}
-		host := o
-		if strings.HasPrefix(o, "*.") {
-			host = "https://" + strings.TrimPrefix(o, "*.")
+		pattern, err := embedpolicy.NormalizePattern(raw)
+		if err != nil {
+			return err
 		}
-		u, err := url.Parse(host)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("invalid allowed origin: %q", o)
+		if pattern == "*" && isProductionMode() {
+			return fmt.Errorf("wildcard origin '*' is not allowed in production")
 		}
+		count++
+	}
+	if count == 0 {
+		return fmt.Errorf("at least one allowed origin is required")
 	}
 	return nil
 }
@@ -366,9 +356,6 @@ func (h *EmbedChannelHandler) GetEmbedChunk(c *gin.Context) {
 		}
 		return
 	}
-	if chunk.Content != "" {
-		chunk.Content = secutils.SanitizeForDisplay(chunk.Content)
-	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": chunk})
 }
 
@@ -382,13 +369,15 @@ func (h *EmbedChannelHandler) GetEmbedSuggestedQuestions(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"questions": []types.SuggestedQuestion{}}})
 		return
 	}
-	limit := 6
+	// limit == 0 signals "unspecified" so the channel agent's starter count
+	// applies. A provided value is honored up to the embed cap.
+	limit := 0
 	if raw := c.Query("limit"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			limit = n
-		}
-		if limit > 12 {
-			limit = 12
+			if limit > 12 {
+				limit = 12
+			}
 		}
 	}
 	questions, err := h.embedSvc.SuggestedQuestions(c.Request.Context(), ch, limit)
@@ -404,6 +393,12 @@ func (h *EmbedChannelHandler) GetEmbedSuggestedQuestions(c *gin.Context) {
 }
 
 func (h *EmbedChannelHandler) CreateEmbedSession(c *gin.Context) {
+	if len(secutils.SystemHMACKey()) == 0 {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "embed session signing key is not configured: set SYSTEM_SIGNING_KEY on the server",
+		})
+		return
+	}
 	ctx := c.Request.Context()
 	ch, ok := middleware.EmbedChannelFromContext(ctx)
 	if !ok {
@@ -672,7 +667,14 @@ func (h *EmbedChannelHandler) ensureEmbedSession(c *gin.Context) error {
 		ctx = types.WithEmbedVisitorID(ctx, visitorID)
 	}
 	c.Set(types.PrincipalContextKey.String(), principal)
-	c.Request = c.Request.WithContext(types.WithPrincipal(ctx, principal))
+	// Embed visitors are anonymous, so every delegated handler must keep
+	// returning `resource://` handles: their images stay behind the
+	// channel-scoped /embed/:channel_id/files proxy instead of being handed out
+	// as shareable, credential-free URLs. Pinning it here covers both the
+	// `?resource_urls=public` query parameter and a deployment-wide
+	// RESOURCE_URL_MODE=public default.
+	ctx = storageurl.WithForcedHandleMode(types.WithPrincipal(ctx, principal))
+	c.Request = c.Request.WithContext(ctx)
 	return nil
 }
 
@@ -697,7 +699,24 @@ func patchEmbedChatPayload(body io.Reader, ch *types.EmbedChannel, agentMode boo
 		payload = make(map[string]any)
 	}
 	payload["agent_id"] = ch.AgentID
+	// The channel's agent belongs to the channel's workspace; a visitor-supplied
+	// source workspace would switch it to another workspace's share of that ID.
+	delete(payload, types.AgentSourceTenantIDParam)
 	payload["knowledge_base_ids"] = []string{}
+	// Visitors are anonymous and run as Viewer of the whole channel workspace.
+	// Explicit targets (documents, tags, @mentions) and a model override are
+	// only honored within an agent's scope for shared agents, so for a
+	// channel's own agent they would reach any KB or model of the workspace by
+	// ID. A question origin selects a KB like an @mention for agents that
+	// retrieve only when mentioned. The widget never sends any of them;
+	// retrieval follows the channel agent. (suggestion_attribution is sent,
+	// and is validated against the session's recorded suggestions.)
+	payload["knowledge_ids"] = []string{}
+	payload["tag_ids"] = []string{}
+	payload["mentioned_items"] = []any{}
+	payload["skill_names"] = []string{}
+	delete(payload, "summary_model_id")
+	delete(payload, "question_origin")
 	clientWebSearch := false
 	if v, ok := payload["web_search_enabled"].(bool); ok {
 		clientWebSearch = v
@@ -749,7 +768,7 @@ func (h *EmbedChannelHandler) GetEmbedChannelStats(c *gin.Context) {
 		return
 	}
 
-	result, err := h.sessionService.ListSessions(ctx, &types.SessionListQuery{
+	result, err := h.sessionService.CountSessionsBySource(ctx, &types.SessionListQuery{
 		TenantID: tenantID,
 		Source:   "embed:" + channelID,
 		Page:     1,
@@ -759,10 +778,7 @@ func (h *EmbedChannelHandler) GetEmbedChannelStats(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	total := int64(0)
-	if result != nil {
-		total = result.Total
-	}
+	total := result
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{

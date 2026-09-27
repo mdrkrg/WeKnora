@@ -95,10 +95,13 @@ export interface RegisterResponse {
 // 新加 key 时记得：后端 service.UpdateUserPreferences 也要在 merge 分支里
 // 处理；前端调用方按需读 / 默认值降级。
 export interface UserPreferences {
+  browser_search_instructions?: string | null
   // last_active_tenant_id 持久化「刷新 / 换设备 / 重新登录后回到上次的空间」
   // 偏好；后端在 Login / RefreshToken 时校验 membership 有效后才会沿用，
   // 否则回退到 home 并清掉这个字段。传 0 给 PATCH 表示「清除偏好」。
   last_active_tenant_id?: number | null
+  // oidc_only_login 为 true 表示账号由 OIDC 自动开通且用户尚未设置已知密码。
+  oidc_only_login?: boolean
 }
 
 // 用户信息接口
@@ -260,6 +263,7 @@ export async function getOIDCConfig(): Promise<OIDCConfigResponse> {
 export interface AuthConfigResponse {
   success: boolean
   registration_mode: 'self_serve' | 'invite_only' | string
+  complex_password_enabled: boolean
 }
 
 export async function getAuthConfig(): Promise<AuthConfigResponse> {
@@ -267,7 +271,7 @@ export async function getAuthConfig(): Promise<AuthConfigResponse> {
     const response = await get('/api/v1/auth/config')
     return response as unknown as AuthConfigResponse
   } catch {
-    return { success: false, registration_mode: 'self_serve' }
+    return { success: false, registration_mode: 'self_serve', complex_password_enabled: false }
   }
 }
 
@@ -289,16 +293,34 @@ export async function register(data: RegisterRequest): Promise<RegisterResponse>
 /**
  * Lite 版自动初始化（创建默认用户/空间 + 签发令牌）
  */
-export async function autoSetup(): Promise<LoginResponse> {
-  try {
-    const response = await post('/api/v1/auth/auto-setup', {})
-    return response as unknown as LoginResponse
-  } catch (error: any) {
-    return {
-      success: false,
-      message: error.message || 'Auto-setup unavailable'
+let autoSetupPromise: Promise<LoginResponse> | null = null
+
+export function autoSetup(): Promise<LoginResponse> {
+  if (autoSetupPromise) return autoSetupPromise
+
+  const request = (async () => {
+    try {
+      const nativeApp = (window as any).go?.main?.App
+      if (!nativeApp?.GetAutoSetupToken) return { success: false, message: 'Desktop authentication required' }
+      const token = await nativeApp.GetAutoSetupToken()
+      const response = await post('/api/v1/auth/auto-setup', {}, {
+        headers: { 'X-WeKnora-Desktop-Token': token },
+      })
+      return response as unknown as LoginResponse
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error.message || 'Auto-setup unavailable'
+      }
     }
-  }
+  })()
+
+  autoSetupPromise = request
+  void request.then(
+    () => { if (autoSetupPromise === request) autoSetupPromise = null },
+    () => { if (autoSetupPromise === request) autoSetupPromise = null },
+  )
+  return request
 }
 
 /**
@@ -319,12 +341,13 @@ export interface MembershipInfo {
  */
 export interface AuthCapabilities {
   can_create_tenant: boolean
+  auto_accept_invitation: boolean
 }
 
-export async function getCurrentUser(): Promise<{ success: boolean; data?: { user: UserInfo; tenant?: TenantInfo | null; memberships?: MembershipInfo[]; tenant_required?: boolean; capabilities?: AuthCapabilities }; message?: string }> {
+export async function getCurrentUser(): Promise<{ success: boolean; data?: { user: UserInfo; tenant?: TenantInfo | null; memberships?: MembershipInfo[]; tenant_required?: boolean; capabilities?: AuthCapabilities; preference_defaults?: { browser_search_instructions: string } }; message?: string }> {
   try {
     const response = await get('/api/v1/auth/me')
-    return response as unknown as { success: boolean; data?: { user: UserInfo; tenant?: TenantInfo | null; memberships?: MembershipInfo[]; tenant_required?: boolean; capabilities?: AuthCapabilities }; message?: string }
+    return response as unknown as { success: boolean; data?: { user: UserInfo; tenant?: TenantInfo | null; memberships?: MembershipInfo[]; tenant_required?: boolean; capabilities?: AuthCapabilities; preference_defaults?: { browser_search_instructions: string } }; message?: string }
   } catch (error: any) {
     return {
       success: false,
@@ -410,6 +433,50 @@ export async function logout(): Promise<{ success: boolean; message?: string }> 
     return {
       success: false,
       message: error.message || t('error.auth.logoutFailed')
+    }
+  }
+}
+
+export interface ChangePasswordRequest {
+  old_password: string
+  new_password: string
+}
+
+/** Map change-password API failures to localized UI strings. */
+export function resolveChangePasswordError(error: any): string {
+  const details =
+    typeof error?.error?.details === 'string'
+      ? error.error.details
+      : typeof error?.details === 'string'
+        ? error.details
+        : ''
+  switch (details) {
+    case 'invalid_old_password':
+      return t('userProfile.changePassword.failed')
+    case 'password_policy':
+      return t('userProfile.changePassword.policyFailed')
+    case 'same_password':
+      return t('userProfile.changePassword.sameAsCurrent')
+    default:
+      return error?.message || t('userProfile.changePassword.failed')
+  }
+}
+
+/**
+ * Self-service password rotation. On success the backend revokes every
+ * outstanding session for the caller, so the client should clear local
+ * auth state and send the user back to /login.
+ */
+export async function changePassword(
+  data: ChangePasswordRequest,
+): Promise<{ success: boolean; message?: string }> {
+  try {
+    const response = await post('/api/v1/auth/change-password', data)
+    return response as unknown as { success: boolean; message?: string }
+  } catch (error: any) {
+    return {
+      success: false,
+      message: resolveChangePasswordError(error),
     }
   }
 }

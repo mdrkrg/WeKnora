@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,7 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/utils"
 )
 
-const paddleOCRVLTimeout = 1000 * time.Second // large scanned PDFs can take a while
+const defaultPaddleOCRVLTimeout = 1000 * time.Second // large scanned PDFs can take a while
 
 // PaddleOCRVLReader calls a self-hosted PaddleOCR-VL pipeline service
 // (the full document-parsing API, not the bare VLM inference server).
@@ -27,6 +28,7 @@ const paddleOCRVLTimeout = 1000 * time.Second // large scanned PDFs can take a w
 // response containing per-page markdown + inline base64 images.
 type PaddleOCRVLReader struct {
 	endpoint string
+	timeout  time.Duration
 	useSeal  bool
 	useChart bool
 }
@@ -34,15 +36,35 @@ type PaddleOCRVLReader struct {
 // NewPaddleOCRVLReader creates a reader from ParserEngineOverrides.
 func NewPaddleOCRVLReader(overrides map[string]string) *PaddleOCRVLReader {
 	return &PaddleOCRVLReader{
+		timeout:  paddleOCRVLRequestTimeout(),
 		endpoint: strings.TrimRight(overrides["paddleocr_vl_endpoint"], "/"),
 		useSeal:  parseBoolOr(overrides["paddleocr_vl_use_seal_recognition"], true),
 		useChart: parseBoolOr(overrides["paddleocr_vl_use_chart_recognition"], false),
 	}
 }
 
+// paddleOCRVLRequestTimeout bounds a self-hosted layout-parsing request.
+// The caller's context may impose an earlier deadline.
+func paddleOCRVLRequestTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("WEKNORA_PADDLEOCR_VL_TIMEOUT"))
+	if value == "" {
+		return defaultPaddleOCRVLTimeout
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		logger.Warnf(context.Background(), "Invalid WEKNORA_PADDLEOCR_VL_TIMEOUT %q; using %s",
+			value, defaultPaddleOCRVLTimeout)
+		return defaultPaddleOCRVLTimeout
+	}
+	return timeout
+}
+
 func (c *PaddleOCRVLReader) Read(ctx context.Context, req *types.ReadRequest) (*types.ReadResult, error) {
 	if c.endpoint == "" {
 		return &types.ReadResult{Error: "PaddleOCR-VL endpoint is not configured"}, nil
+	}
+	if err := utils.ValidateURLForSSRF(c.endpoint); err != nil {
+		return &types.ReadResult{Error: fmt.Sprintf("PaddleOCR-VL endpoint blocked by SSRF policy: %v", err)}, nil
 	}
 
 	content := req.FileContent
@@ -62,7 +84,7 @@ func (c *PaddleOCRVLReader) Read(ctx context.Context, req *types.ReadRequest) (*
 	// wastes tokens and defeats the chunker's table-protection logic. Convert
 	// them to Markdown tables (or strip layout attributes when conversion is
 	// not possible) before downstream processing.
-	mdContent = normalizeHTMLTables(mdContent)
+	mdContent = NormalizeHTMLTables(mdContent)
 
 	imageRefs, mdContent := c.processImages(mdContent, imagesB64)
 	mdContent, imageRefs = ensureOriginalImageRef(req, mdContent, imageRefs)
@@ -157,7 +179,10 @@ func (c *PaddleOCRVLReader) callLayoutParsing(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: paddleOCRVLTimeout}
+	client := utils.NewSSRFSafeHTTPClient(utils.SSRFSafeHTTPClientConfig{
+		Timeout:      c.timeout,
+		MaxRedirects: 5,
+	})
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", nil, fmt.Errorf("HTTP request: %w", err)
@@ -264,6 +289,9 @@ func PingPaddleOCRVL(endpoint string) (bool, string) {
 	endpoint = strings.TrimRight(endpoint, "/")
 	if endpoint == "" {
 		return false, "未配置 PaddleOCR-VL 端点"
+	}
+	if err := utils.ValidateURLForSSRF(endpoint); err != nil {
+		return false, fmt.Sprintf("PaddleOCR-VL 端点未通过 SSRF 校验: %v", err)
 	}
 	client := utils.NewSSRFSafeHTTPClient(utils.SSRFSafeHTTPClientConfig{
 		Timeout:      5 * time.Second,

@@ -24,6 +24,7 @@ type Config struct {
 	Auth            *AuthConfig            `yaml:"auth"             json:"auth"`
 	Audit           *AuditConfig           `yaml:"audit"            json:"audit"`
 	OIDCAuth        *OIDCAuthConfig        `yaml:"oidc_auth"        json:"oidc_auth"`
+	LTI             *LTIConfig             `yaml:"lti"              json:"lti"`
 	Models          []ModelConfig          `yaml:"models"           json:"models"`
 	VectorDatabase  *VectorDatabaseConfig  `yaml:"vector_database"  json:"vector_database"`
 	DocReader       *DocReaderConfig       `yaml:"docreader"        json:"docreader"`
@@ -114,6 +115,9 @@ type ConversationConfig struct {
 	ExtractRelationshipsPromptID string `yaml:"extract_relationships_prompt_id"   json:"extract_relationships_prompt_id"`
 	GenerateQuestionsPromptID    string `yaml:"generate_questions_prompt_id"      json:"generate_questions_prompt_id"`
 
+	// GenerateKBDescriptionPromptID selects the knowledge-base description template.
+	GenerateKBDescriptionPromptID string `yaml:"generate_kb_description_prompt_id" json:"generate_kb_description_prompt_id"` //nolint:lll // one-line struct tag
+
 	// Resolved prompt text fields (populated by backfill, not from YAML)
 	FallbackPrompt             string `yaml:"-" json:"fallback_prompt"`
 	RewritePromptSystem        string `yaml:"-" json:"rewrite_prompt_system"`
@@ -123,6 +127,9 @@ type ConversationConfig struct {
 	ExtractEntitiesPrompt      string `yaml:"-" json:"extract_entities_prompt"`
 	ExtractRelationshipsPrompt string `yaml:"-" json:"extract_relationships_prompt"`
 	GenerateQuestionsPrompt    string `yaml:"-" json:"generate_questions_prompt"`
+
+	// GenerateKBDescriptionPrompt is the resolved knowledge-base description template text.
+	GenerateKBDescriptionPrompt string `yaml:"-" json:"generate_kb_description_prompt"`
 
 	// IntentSystemPrompts maps intent values (e.g. "greeting", "chitchat") to
 	// system prompt text. Populated by backfill from IntentPrompts templates.
@@ -279,7 +286,8 @@ type AuthConfig struct {
 	// create_personal preserves the historical one-user-one-workspace default;
 	// tenantless creates only the identity and waits for an invitation or an
 	// explicit self-service tenant creation.
-	DefaultTenantMode string `yaml:"default_tenant_mode" json:"default_tenant_mode"`
+	DefaultTenantMode      string `yaml:"default_tenant_mode" json:"default_tenant_mode"`
+	ComplexPasswordEnabled bool   `yaml:"complex_password_enabled" json:"complex_password_enabled"`
 }
 
 // AuthRegistrationMode constants used by handlers and middleware.
@@ -316,9 +324,36 @@ type OIDCAuthConfig struct {
 	AuthorizationEndpoint string               `yaml:"authorization_endpoint" json:"authorization_endpoint"`
 	TokenEndpoint         string               `yaml:"token_endpoint"         json:"token_endpoint"`
 	UserInfoEndpoint      string               `yaml:"user_info_endpoint"     json:"user_info_endpoint"`
+	JwksURI               string               `yaml:"jwks_uri"               json:"jwks_uri"`
 	Scopes                []string             `yaml:"scopes"                 json:"scopes"`
 	UserInfoMapping       *OIDCUserInfoMapping `yaml:"user_info_mapping"      json:"user_info_mapping"`
 }
+
+// LTIConfig holds LTI 1.3 tool-side settings. Sourced from the LTI_* env
+// group at startup (see applyLTIEnvOverrides).
+type LTIConfig struct {
+	Enable         bool          `yaml:"enable"                json:"enable"`
+	HandoffURL     string        `yaml:"handoff_url"           json:"handoff_url"`
+	LaunchURL      string        `yaml:"launch_url"            json:"launch_url"`
+	FrameAncestors string        `yaml:"frame_ancestors"       json:"frame_ancestors"`
+	NonceMaxAge    time.Duration `yaml:"nonce_max_age"         json:"nonce_max_age"`
+	TicketTTL      time.Duration `yaml:"ticket_ttl"            json:"ticket_ttl"`
+	// SelfHandoffEnable exposes GET /lti/handoff, which lets a deployment use
+	// WeKnora itself as the launch handoff target: the browser exchanges the
+	// ticket for a session and is redirected into the SPA through the URL hash
+	// (mirroring the OIDC callback channel). Disabled by default so the shell
+	// doesn't surface a session-minting endpoint unless explicitly opted in.
+	SelfHandoffEnable bool `yaml:"self_handoff_enable" json:"self_handoff_enable"`
+}
+
+// DefaultLTINonceMaxAge and DefaultLTITicketTTL are the secure fallbacks
+// applied by applyLTIEnvOverrides when the LTI_* env group leaves the values
+// unset. The lti package references them too so the tool core and config
+// cannot drift apart.
+const (
+	DefaultLTINonceMaxAge = 10 * time.Minute
+	DefaultLTITicketTTL   = 120 * time.Second
+)
 
 // PromptTemplateI18n holds localized name and description for a prompt template.
 type PromptTemplateI18n struct {
@@ -359,10 +394,12 @@ type PromptTemplatesConfig struct {
 
 	GenerateSessionTitle []PromptTemplate `yaml:"generate_session_title" json:"generate_session_title,omitempty"`
 	GenerateSummary      []PromptTemplate `yaml:"generate_summary"       json:"generate_summary,omitempty"`
-	KeywordsExtraction   []PromptTemplate `yaml:"keywords_extraction"    json:"keywords_extraction,omitempty"`
-	AgentSystemPrompt    []PromptTemplate `yaml:"agent_system_prompt"    json:"agent_system_prompt,omitempty"`
-	GraphExtraction      []PromptTemplate `yaml:"graph_extraction"       json:"graph_extraction,omitempty"`
-	GenerateQuestions    []PromptTemplate `yaml:"generate_questions"     json:"generate_questions,omitempty"`
+	// GenerateKBDescription writes the knowledge-base gist from the document profile aggregate.
+	GenerateKBDescription []PromptTemplate `yaml:"generate_kb_description" json:"generate_kb_description,omitempty"` //nolint:lll // one-line struct tag
+	KeywordsExtraction    []PromptTemplate `yaml:"keywords_extraction"    json:"keywords_extraction,omitempty"`
+	AgentSystemPrompt     []PromptTemplate `yaml:"agent_system_prompt"    json:"agent_system_prompt,omitempty"`
+	GraphExtraction       []PromptTemplate `yaml:"graph_extraction"       json:"graph_extraction,omitempty"`
+	GenerateQuestions     []PromptTemplate `yaml:"generate_questions"     json:"generate_questions,omitempty"`
 	// IntentPrompts holds per-intent system prompt overrides (template ID = intent value).
 	IntentPrompts []PromptTemplate `yaml:"intent_prompts" json:"intent_prompts,omitempty"`
 }
@@ -578,6 +615,7 @@ func LoadConfig() (*Config, error) {
 
 	// Validate configuration values
 	applyOIDCEnvOverrides(&cfg)
+	applyLTIEnvOverrides(&cfg)
 	applyAgentEnvOverrides(&cfg)
 	applyKnowledgeBaseEnvOverrides(&cfg)
 	applyAuthAndTenantDefaults(&cfg)
@@ -632,6 +670,7 @@ func ValidateConfig(cfg *Config) error {
 			errs = append(errs, fmt.Sprintf("auth.registration_mode must be %q or %q, got %q",
 				AuthRegistrationModeSelfServe, AuthRegistrationModeInviteOnly, mode))
 		}
+
 		tenantMode := strings.TrimSpace(cfg.Auth.DefaultTenantMode)
 		if tenantMode != "" && tenantMode != AuthDefaultTenantModeCreatePersonal && tenantMode != AuthDefaultTenantModeTenantless {
 			errs = append(errs, fmt.Sprintf("auth.default_tenant_mode must be %q or %q, got %q",
@@ -718,6 +757,9 @@ func applyOIDCEnvOverrides(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("OIDC_AUTH_USER_INFO_ENDPOINT")); value != "" {
 		cfg.OIDCAuth.UserInfoEndpoint = value
 	}
+	if value := strings.TrimSpace(os.Getenv("OIDC_AUTH_JWKS_URI")); value != "" {
+		cfg.OIDCAuth.JwksURI = value
+	}
 	if value := strings.TrimSpace(os.Getenv("OIDC_AUTH_SCOPES")); value != "" {
 		cfg.OIDCAuth.Scopes = strings.Fields(strings.ReplaceAll(value, ",", " "))
 	}
@@ -742,6 +784,47 @@ func applyOIDCEnvOverrides(cfg *Config) {
 	}
 	if cfg.OIDCAuth.DiscoveryURL == "" && cfg.OIDCAuth.IssuerURL != "" {
 		cfg.OIDCAuth.DiscoveryURL = strings.TrimRight(cfg.OIDCAuth.IssuerURL, "/") + "/.well-known/openid-configuration"
+	}
+}
+
+func applyLTIEnvOverrides(cfg *Config) {
+	if cfg.LTI == nil {
+		cfg.LTI = &LTIConfig{}
+	}
+	if cfg.LTI.NonceMaxAge <= 0 {
+		cfg.LTI.NonceMaxAge = DefaultLTINonceMaxAge
+	}
+	if cfg.LTI.TicketTTL <= 0 {
+		cfg.LTI.TicketTTL = DefaultLTITicketTTL
+	}
+	if cfg.LTI.FrameAncestors == "" {
+		cfg.LTI.FrameAncestors = "'self'"
+	}
+
+	if value := strings.TrimSpace(os.Getenv("LTI_ENABLE")); value != "" {
+		cfg.LTI.Enable = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_HANDOFF_URL")); value != "" {
+		cfg.LTI.HandoffURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_LAUNCH_URL")); value != "" {
+		cfg.LTI.LaunchURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_FRAME_ANCESTORS")); value != "" {
+		cfg.LTI.FrameAncestors = value
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_NONCE_MAX_AGE")); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d > 0 {
+			cfg.LTI.NonceMaxAge = d
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_SELF_HANDOFF_ENABLE")); value != "" {
+		cfg.LTI.SelfHandoffEnable = strings.EqualFold(value, "true")
+	}
+	if value := strings.TrimSpace(os.Getenv("LTI_TICKET_TTL")); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d > 0 {
+			cfg.LTI.TicketTTL = d
+		}
 	}
 }
 
@@ -806,8 +889,12 @@ func applyAgentEnvOverrides(cfg *Config) {
 //
 // Env overrides (when set and non-empty):
 //   - WEKNORA_AUTH_DEFAULT_TENANT_MODE ("create_personal"/"tenantless")
+//   - WEKNORA_AUTH_COMPLEX_PASSWORD_ENABLED (boolean)
 //   - WEKNORA_TENANT_SELF_SERVICE_CREATION_ENABLED (boolean)
 //   - WEKNORA_TENANT_ENABLE_RBAC      ("true"/"false", case-insensitive)
+//   - WEKNORA_TENANT_ENABLE_CROSS_TENANT_ACCESS ("true"/"false", case-insensitive).
+//     Read explicitly because viper.AutomaticEnv has no SetEnvPrefix, so the
+//     WEKNORA_-prefixed var is not bound to the nested struct automatically.
 //   - WEKNORA_TENANT_MAX_OWNED_PER_USER (integer; <0 disables the cap,
 //     0 falls back to the handler default, >0 enforces that exact cap).
 //     Unparseable / empty values are ignored so a stale shell variable
@@ -841,6 +928,13 @@ func applyAuthAndTenantDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.Auth.RegistrationMode) == "" {
 		cfg.Auth.RegistrationMode = AuthRegistrationModeSelfServe
 	}
+
+	if value := strings.TrimSpace(os.Getenv("WEKNORA_AUTH_COMPLEX_PASSWORD_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Auth.ComplexPasswordEnabled = parsed
+		}
+	}
+
 	if value := strings.TrimSpace(os.Getenv("WEKNORA_AUTH_DEFAULT_TENANT_MODE")); value != "" {
 		cfg.Auth.DefaultTenantMode = value
 	}
@@ -857,6 +951,16 @@ func applyAuthAndTenantDefaults(cfg *Config) {
 		// via config.yaml `enable_rbac: false` or the env override.
 		on := true
 		cfg.Tenant.EnableRBAC = &on
+	}
+
+	// WEKNORA_TENANT_ENABLE_CROSS_TENANT_ACCESS mirrors the RBAC switch above.
+	// It must be read explicitly: viper.AutomaticEnv has no SetEnvPrefix, so the
+	// WEKNORA_-prefixed env var is never bound to the nested struct field —
+	// without this block, only config.yaml's enable_cross_tenant_access takes
+	// effect and the documented env override is silently ignored. The default
+	// stays whatever config.yaml provides (false unless set there).
+	if value := strings.TrimSpace(os.Getenv("WEKNORA_TENANT_ENABLE_CROSS_TENANT_ACCESS")); value != "" {
+		cfg.Tenant.EnableCrossTenantAccess = strings.EqualFold(value, "true")
 	}
 
 	if value := strings.TrimSpace(os.Getenv("WEKNORA_TENANT_SELF_SERVICE_CREATION_ENABLED")); value != "" {
@@ -953,6 +1057,13 @@ func backfillConversationDefaults(cfg *Config) {
 			fmt.Printf("Warning: generate_summary_prompt_id %q not found\n", conv.GenerateSummaryPromptID)
 		}
 	}
+	if conv.GenerateKBDescriptionPromptID != "" {
+		if t := FindTemplateByID(pt, conv.GenerateKBDescriptionPromptID); t != nil {
+			conv.GenerateKBDescriptionPrompt = t.Content
+		} else {
+			fmt.Printf("Warning: generate_kb_description_prompt_id %q not found\n", conv.GenerateKBDescriptionPromptID)
+		}
+	}
 	if conv.ExtractEntitiesPromptID != "" {
 		if t := FindTemplateByID(pt, conv.ExtractEntitiesPromptID); t != nil {
 			conv.ExtractEntitiesPrompt = t.Content
@@ -1017,6 +1128,7 @@ func FindTemplateByID(pt *PromptTemplatesConfig, id string) *PromptTemplate {
 		pt.Fallback,
 		pt.GenerateSessionTitle,
 		pt.GenerateSummary,
+		pt.GenerateKBDescription,
 		pt.KeywordsExtraction,
 		pt.AgentSystemPrompt,
 		pt.GraphExtraction,
@@ -1062,17 +1174,18 @@ func loadPromptTemplates(configDir string) (*PromptTemplatesConfig, error) {
 
 	// 定义模板文件映射
 	templateFiles := map[string]*[]PromptTemplate{
-		"system_prompt.yaml":          &config.SystemPrompt,
-		"context_template.yaml":       &config.ContextTemplate,
-		"rewrite.yaml":                &config.Rewrite,
-		"fallback.yaml":               &config.Fallback,
-		"generate_session_title.yaml": &config.GenerateSessionTitle,
-		"generate_summary.yaml":       &config.GenerateSummary,
-		"keywords_extraction.yaml":    &config.KeywordsExtraction,
-		"agent_system_prompt.yaml":    &config.AgentSystemPrompt,
-		"graph_extraction.yaml":       &config.GraphExtraction,
-		"generate_questions.yaml":     &config.GenerateQuestions,
-		"intent_prompts.yaml":         &config.IntentPrompts,
+		"system_prompt.yaml":           &config.SystemPrompt,
+		"context_template.yaml":        &config.ContextTemplate,
+		"rewrite.yaml":                 &config.Rewrite,
+		"fallback.yaml":                &config.Fallback,
+		"generate_session_title.yaml":  &config.GenerateSessionTitle,
+		"generate_summary.yaml":        &config.GenerateSummary,
+		"generate_kb_description.yaml": &config.GenerateKBDescription,
+		"keywords_extraction.yaml":     &config.KeywordsExtraction,
+		"agent_system_prompt.yaml":     &config.AgentSystemPrompt,
+		"graph_extraction.yaml":        &config.GraphExtraction,
+		"generate_questions.yaml":      &config.GenerateQuestions,
+		"intent_prompts.yaml":          &config.IntentPrompts,
 	}
 
 	// 加载每个模板文件

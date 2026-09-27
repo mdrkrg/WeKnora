@@ -1,0 +1,463 @@
+package lti
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/Tencent/WeKnora/internal/config"
+	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+// Audit actions emitted by the protocol handlers. Defined package-locally
+// (following the lti.member_provisioned precedent) so the shell stays
+// deployment-agnostic and does not extend the platform's types package.
+const (
+	// AuditActionLTITicketIssued fires when a launch resolves an account and
+	// a single-use ticket is minted.
+	AuditActionLTITicketIssued types.AuditAction = "lti.ticket_issued"
+	// AuditActionLTITicketRedeemed fires when a ticket is successfully
+	// exchanged for a session JWT pair.
+	AuditActionLTITicketRedeemed types.AuditAction = "lti.ticket_redeemed"
+	// AuditActionLTITicketRedeemDenied fires when redemption is rejected,
+	// most notably a replay attempt (reason=consumed).
+	AuditActionLTITicketRedeemDenied types.AuditAction = "lti.ticket_redeem_denied"
+)
+
+// Handler serves the LTI endpoints. All dependencies are injected so the
+// package stays deployment-agnostic.
+type Handler struct {
+	cfg           *config.LTIConfig
+	registrations RegistrationStore
+	tickets       TicketService
+	keys          ToolKeyStore
+	verifier      *Verifier
+	resolver      IdentityResolver
+	minter        TokenMinter
+	audit         AuditSink
+}
+
+// NewHandler wires an LTI handler.
+func NewHandler(
+	cfg *config.LTIConfig,
+	registrations RegistrationStore,
+	tickets TicketService,
+	keys ToolKeyStore,
+	verifier *Verifier,
+	resolver IdentityResolver,
+	minter TokenMinter,
+	audit AuditSink,
+) *Handler {
+	return &Handler{
+		cfg:           cfg,
+		registrations: registrations,
+		tickets:       tickets,
+		keys:          keys,
+		verifier:      verifier,
+		resolver:      resolver,
+		minter:        minter,
+		audit:         audit,
+	}
+}
+
+// emitAudit is a no-op when no audit sink is configured.
+func (h *Handler) emitAudit(ctx context.Context, entry *types.AuditLog) {
+	if h.audit == nil {
+		return
+	}
+	_ = h.audit.Log(ctx, entry)
+}
+
+// auditDetailsJSON renders a key/value map as the Details JSON payload.
+func auditDetailsJSON(m map[string]any) types.JSON {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return types.JSON("{}")
+	}
+	return types.JSON(b)
+}
+
+// LoginInitiation implements the LTI 1.3 OIDC third-party initiated login
+// endpoint (POST /lti/login_initiations): it resolves the platform
+// registration and redirects the browser to the platform's authorization
+// endpoint with a signed nonce state.
+func (h *Handler) LoginInitiation(c *gin.Context) {
+	if !h.enabled() {
+		h.renderFailure(c, http.StatusNotFound, "LTI 未启用", "LTI 登录通道尚未启用。")
+		return
+	}
+	iss := strings.TrimSpace(c.PostForm("iss"))
+	clientID := strings.TrimSpace(c.PostForm("client_id"))
+	loginHint := strings.TrimSpace(c.PostForm("login_hint"))
+	targetLink := strings.TrimSpace(c.PostForm("target_link_uri"))
+	messageHint := strings.TrimSpace(c.PostForm("lti_message_hint"))
+	if iss == "" || clientID == "" {
+		h.renderFailure(c, http.StatusBadRequest, "参数缺失", "缺少 iss 或 client_id。")
+		return
+	}
+	reg, err := h.registrations.GetByIssuerAndClientID(c.Request.Context(), iss, clientID)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "查询 LTI 注册信息失败。")
+		return
+	}
+	if reg == nil || !reg.Enabled {
+		h.renderFailure(c, http.StatusNotFound, "未注册的 LTI 平台", "该平台（iss/client_id）未配置 LTI 注册。")
+		return
+	}
+	if reg.AuthEndpoint == "" {
+		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "该注册缺少授权端点。")
+		return
+	}
+	nonce, err := randomToken()
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "生成 nonce 失败。")
+		return
+	}
+	state, err := SignNonceState(nonce)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "生成 state 失败。")
+		return
+	}
+
+	q := url.Values{}
+	q.Set("response_type", "id_token")
+	q.Set("scope", "openid")
+	q.Set("response_mode", "form_post")
+	q.Set("client_id", reg.ClientID)
+	q.Set("redirect_uri", h.launchURL(c))
+	q.Set("nonce", nonce)
+	q.Set("state", state)
+	q.Set("prompt", "none")
+	if loginHint != "" {
+		q.Set("login_hint", loginHint)
+	}
+	if targetLink != "" {
+		q.Set("target_link_uri", targetLink)
+	}
+	if messageHint != "" {
+		q.Set("lti_message_hint", messageHint)
+	}
+
+	var location string
+	if u, perr := url.Parse(reg.AuthEndpoint); perr == nil {
+		merged := u.Query()
+		for k, vs := range q {
+			for _, v := range vs {
+				merged.Add(k, v)
+			}
+		}
+		u.RawQuery = merged.Encode()
+		location = u.String()
+	} else {
+		location = reg.AuthEndpoint + "?" + q.Encode()
+	}
+	c.Redirect(http.StatusFound, location)
+}
+
+// Launch consumes the platform's form_post id_token, resolves the account and
+// issues a single-use ticket (POST /lti/launch).
+func (h *Handler) Launch(c *gin.Context) {
+	if !h.enabled() {
+		h.renderFailure(c, http.StatusNotFound, "LTI 未启用", "LTI 登录通道尚未启用。")
+		return
+	}
+	rawToken := strings.TrimSpace(c.PostForm("id_token"))
+	stateRaw := strings.TrimSpace(c.PostForm("state"))
+	if rawToken == "" || stateRaw == "" {
+		h.renderFailure(c, http.StatusBadRequest, "参数缺失", "缺少 id_token 或 state。")
+		return
+	}
+	state, err := VerifyNonceState(stateRaw, h.cfg.NonceMaxAge)
+	if err != nil {
+		h.renderFailure(c, http.StatusBadRequest, "无效请求", "state 校验失败，请从课程入口重新进入。")
+		return
+	}
+
+	// The registration is selected from the unverified token claims; the
+	// signature is only trusted after Verify against that registration.
+	claims, err := parseUnverifiedClaims(rawToken)
+	if err != nil {
+		h.renderFailure(c, http.StatusBadRequest, "无效请求", "无法解析 id_token。")
+		return
+	}
+	iss, _ := claims["iss"].(string)
+	aud := firstAudience(claims["aud"])
+	if iss == "" || aud == "" {
+		h.renderFailure(c, http.StatusBadRequest, "无效请求", "id_token 缺少 iss 或 aud。")
+		return
+	}
+	reg, err := h.registrations.GetByIssuerAndClientID(c.Request.Context(), iss, aud)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "查询 LTI 注册信息失败。")
+		return
+	}
+	if reg == nil || !reg.Enabled {
+		// Untrusted token against an unknown registration.
+		c.Status(http.StatusUnauthorized)
+		return
+	}
+
+	vt, err := h.verifier.Verify(c.Request.Context(), rawToken, reg)
+	if err != nil {
+		h.renderFailure(c, http.StatusBadRequest, "身份校验失败", "id_token 签名或声明校验未通过。")
+		return
+	}
+	if vt.Nonce != state.Nonce {
+		h.renderFailure(c, http.StatusBadRequest, "身份校验失败", "nonce 不匹配。")
+		return
+	}
+
+	// Record the deployment seen at launch so operators with an empty
+	// deployment_ids allowlist (which deliberately admits any deployment) can
+	// detect which deployment actually launched.
+	logger.Infof(c.Request.Context(), "[LTI] launch verified: iss=%s client_id=%s deployment_id=%s sub=%s",
+		reg.Issuer, reg.ClientID, vt.DeploymentID, vt.Sub)
+
+	res, err := h.resolver.Resolve(c.Request.Context(), &LaunchIdentity{
+		RegistrationID: reg.ID,
+		Sub:            vt.Sub,
+		Email:          vt.Email,
+		DirectoryUID:   vt.DirectoryUID,
+		Roles:          vt.Roles,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrIdentityNotFound):
+			h.renderFailure(c, http.StatusBadRequest, "无匹配账号", "该邮箱未对应任何 WeKnora 账号，无法登录。")
+		default:
+			h.renderFailure(c, http.StatusInternalServerError, "服务错误", "身份解析失败。")
+		}
+		return
+	}
+
+	handoff := strings.TrimSpace(h.cfg.HandoffURL)
+	if handoff == "" {
+		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "未配置 handoff 地址。")
+		return
+	}
+	target, err := url.Parse(handoff)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "配置错误", "handoff 地址无效。")
+		return
+	}
+
+	raw, err := h.tickets.Issue(c.Request.Context(), res.UserID, vt.ContextID, vt.Roles)
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "签发登录凭证失败。")
+		return
+	}
+	h.emitAudit(c.Request.Context(), &types.AuditLog{
+		Action:        AuditActionLTITicketIssued,
+		ActorUserID:   res.UserID,
+		TargetType:    "lti_ticket",
+		RequestPath:   c.Request.URL.Path,
+		RequestMethod: c.Request.Method,
+		Outcome:       types.AuditOutcomeSuccess,
+		Details: auditDetailsJSON(map[string]any{
+			"iss":        reg.Issuer,
+			"client_id":  reg.ClientID,
+			"context_id": vt.ContextID,
+		}),
+	})
+	q := target.Query()
+	q.Set("ticket", raw)
+	target.RawQuery = q.Encode()
+	c.Redirect(http.StatusFound, target.String())
+}
+
+// JWKS exposes the tool's public signing keys (GET /.well-known/jwks.json).
+// Like the other LTI endpoints it is inert unless LTI is enabled, so a disabled
+// deployment neither advertises keys nor lazily materializes a key pair.
+func (h *Handler) JWKS(c *gin.Context) {
+	if !h.enabled() {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	key, err := h.keys.Ensure(c.Request.Context())
+	if err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "生成工具密钥失败。")
+		return
+	}
+	var jwk json.RawMessage
+	if err := json.Unmarshal([]byte(key.PublicJWK), &jwk); err != nil {
+		h.renderFailure(c, http.StatusInternalServerError, "服务错误", "工具密钥数据损坏。")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"keys": []json.RawMessage{jwk}})
+}
+
+// restoreTicketAfterFailedRedemption hands a consumed ticket back after a
+// mint failure, so the same ticket can be retried. Best-effort, logged only.
+func (h *Handler) restoreTicketAfterFailedRedemption(ctx context.Context, raw string) {
+	if raw == "" {
+		return
+	}
+	if err := h.tickets.Restore(ctx, raw); err != nil {
+		logger.Warnf(ctx, "redeem: failed to restore ticket after mint failure: %v", err)
+	}
+}
+
+// Handoff exchanges a launch ticket for a session JWT pair and delivers it to
+// the SPA through the URL hash, mirroring the OIDC callback channel
+// (GET /lti/handoff). The ticket itself is the bearer credential (single-use,
+// short TTL, HTTPS-only), so no shared secret is involved; equivalent strength
+// to an OIDC code. The endpoint is inert unless LTI_SELF_HANDOFF_ENABLE is set.
+func (h *Handler) Handoff(c *gin.Context) {
+	if !h.enabled() || h.cfg == nil || !h.cfg.SelfHandoffEnable {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	raw := strings.TrimSpace(c.Query("ticket"))
+	if raw == "" {
+		h.redirectLTIError(c, "missing_ticket")
+		return
+	}
+	ticket, err := h.tickets.Consume(c.Request.Context(), raw)
+	if err != nil {
+		var reason string
+		switch {
+		case errors.Is(err, ErrTicketConsumed):
+			reason = "consumed"
+		case errors.Is(err, ErrTicketExpired), errors.Is(err, ErrTicketNotFound):
+			reason = "expired_or_unknown"
+		default:
+			h.redirectLTIError(c, "server_error")
+			return
+		}
+		h.emitAudit(c.Request.Context(), &types.AuditLog{
+			Action:        AuditActionLTITicketRedeemDenied,
+			RequestPath:   c.Request.URL.Path,
+			RequestMethod: c.Request.Method,
+			Outcome:       types.AuditOutcomeDenied,
+			Details:       auditDetailsJSON(map[string]any{"reason": reason}),
+		})
+		h.redirectLTIError(c, "invalid_ticket")
+		return
+	}
+
+	tokens, err := h.minter.IssueDefault(c.Request.Context(), ticket.UserID)
+	if err != nil {
+		// Mint failures are a server-side denial of an otherwise valid
+		// ticket: audit them with enough detail (user_id suffices to trace
+		// the binding row; the sub/authority are never in the ticket) and
+		// surface a specific code so the SPA can explain the failure.
+		reason := "server_error"
+		switch {
+		case errors.Is(err, ErrNoWorkspace):
+			reason = "no_workspace"
+		}
+		h.emitAudit(c.Request.Context(), &types.AuditLog{
+			Action:        AuditActionLTITicketRedeemDenied,
+			ActorUserID:   ticket.UserID,
+			TargetType:    "lti_ticket",
+			RequestPath:   c.Request.URL.Path,
+			RequestMethod: c.Request.Method,
+			Outcome:       types.AuditOutcomeDenied,
+			Details: auditDetailsJSON(map[string]any{
+				"reason":     reason,
+				"user_id":    ticket.UserID,
+				"context_id": ticket.ContextID,
+			}),
+		})
+		// Mirror Redeem: hand the ticket back so a handoff URL still in
+		// browser history stays re-presentable once the issue is resolved.
+		h.restoreTicketAfterFailedRedemption(c.Request.Context(), raw)
+		h.redirectLTIError(c, reason)
+		return
+	}
+
+	details := map[string]any{"context_id": ticket.ContextID}
+	h.emitAudit(c.Request.Context(), &types.AuditLog{
+		Action:        AuditActionLTITicketRedeemed,
+		ActorUserID:   ticket.UserID,
+		TargetType:    "lti_ticket",
+		RequestPath:   c.Request.URL.Path,
+		RequestMethod: c.Request.Method,
+		Outcome:       types.AuditOutcomeSuccess,
+		Details:       auditDetailsJSON(details),
+	})
+
+	payload, err := json.Marshal(map[string]any{
+		"success":       true,
+		"token":         tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+		"user_id":       ticket.UserID,
+		"context_id":    ticket.ContextID,
+	})
+	if err != nil {
+		h.redirectLTIError(c, "server_error")
+		return
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	// The fragment carries a live session pair; keep it out of shared caches.
+	c.Header("Cache-Control", "no-store")
+	c.Redirect(http.StatusFound, "/#lti_result="+url.QueryEscape(encoded))
+}
+
+// redirectLTIError sends the browser back to the SPA with an lti_error hash so
+// the callback handler can surface a message and route to the login page.
+func (h *Handler) redirectLTIError(c *gin.Context, code string) {
+	// Keep the failure hop out of shared caches too, for symmetry with the
+	// success redirect that carries the session in the fragment.
+	c.Header("Cache-Control", "no-store")
+	c.Redirect(http.StatusFound, "/#lti_error="+url.QueryEscape(code))
+}
+
+func (h *Handler) enabled() bool {
+	return h.cfg != nil && h.cfg.Enable
+}
+
+// launchURL returns the tool's own launch endpoint, from config when set and
+// derived from the request otherwise. When TLS terminates at a reverse proxy,
+// the backend only ever sees plain HTTP; the X-Forwarded-Proto header (which
+// nginx forwards from $scheme) is honored so the OIDC redirect_uri matches the
+// registered https launch URL.
+func (h *Handler) launchURL(c *gin.Context) string {
+	if h.cfg != nil && strings.TrimSpace(h.cfg.LaunchURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(h.cfg.LaunchURL), "/")
+	}
+	scheme := "https"
+	if c.Request.TLS == nil {
+		scheme = "http"
+		if proto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")); proto != "" {
+			scheme = strings.ToLower(strings.TrimSpace(strings.Split(proto, ",")[0]))
+		}
+	}
+	return scheme + "://" + c.Request.Host + "/lti/launch"
+}
+
+func (h *Handler) renderFailure(c *gin.Context, status int, title, detail string) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Status(status)
+	_, _ = c.Writer.WriteString(failPageHTML(html.EscapeString(title), html.EscapeString(detail)))
+}
+
+func failPageHTML(title, detail string) string {
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>LTI 登录</title></head>
+<body style="font-family:system-ui,sans-serif;text-align:center;padding:64px 16px">
+<h1>%s</h1><p>%s</p></body></html>`, title, detail)
+}
+
+// parseUnverifiedClaims extracts claims without verifying the signature; used
+// only to select the registration to verify against.
+func parseUnverifiedClaims(raw string) (jwt.MapClaims, error) {
+	token, _, err := new(jwt.Parser).ParseUnverified(raw, jwt.MapClaims{})
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("lti: unexpected claims type")
+	}
+	return claims, nil
+}

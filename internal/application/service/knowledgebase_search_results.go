@@ -279,7 +279,32 @@ func (s *knowledgeBaseService) assembleSearchResults(
 		}
 	}
 
+	logSearchResultChunkTypes(ctx, searchResults)
 	return searchResults
+}
+
+// logSearchResultChunkTypes records how many returned hits came from each
+// chunk type. It exists to answer one question with data: how often does the
+// document-level summary chunk actually surface, compared with text chunks?
+// If "summary" stays near zero in production, indexing it can be dropped.
+func logSearchResultChunkTypes(ctx context.Context, results []*types.SearchResult) {
+	if len(results) == 0 {
+		return
+	}
+	counts := make(map[string]int, 4)
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		key := r.ChunkType
+		if key == "" {
+			key = string(types.ChunkTypeText)
+		}
+		counts[key]++
+	}
+	logger.GetLogger(ctx).WithField("chunk_type_counts", counts).
+		WithField("total", len(results)).
+		Infof("search results by chunk type")
 }
 
 // collectRelatedChunkIDs extracts related chunk IDs from a chunk.
@@ -307,32 +332,43 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 	matchedContent string,
 ) *types.SearchResult {
 	return &types.SearchResult{
-		ID:                chunk.ID,
-		Content:           chunk.Content,
-		KnowledgeID:       chunk.KnowledgeID,
-		ChunkIndex:        chunk.ChunkIndex,
-		KnowledgeTitle:    knowledge.Title,
-		StartAt:           chunk.StartAt,
-		EndAt:             chunk.EndAt,
-		Seq:               chunk.ChunkIndex,
-		Score:             score,
-		MatchType:         matchType,
-		Metadata:          knowledge.GetMetadata(),
-		ChunkType:         string(chunk.ChunkType),
-		ParentChunkID:     chunk.ParentChunkID,
-		ImageInfo:         chunk.ImageInfo,
-		KnowledgeFilename:    knowledge.FileName,
-		KnowledgeSource:      knowledge.Source,
-		KnowledgeChannel:     knowledge.Channel,
-		KnowledgeDescription: knowledge.Description,
-		ChunkMetadata:     chunk.Metadata,
-		MatchedContent:    matchedContent,
-		KnowledgeBaseID:   knowledge.KnowledgeBaseID,
+		ID:                      chunk.ID,
+		Content:                 chunk.Content,
+		ContentRevision:         chunk.ContentRevision,
+		KnowledgeID:             chunk.KnowledgeID,
+		ChunkIndex:              chunk.ChunkIndex,
+		KnowledgeTitle:          knowledge.Title,
+		StartAt:                 chunk.StartAt,
+		EndAt:                   chunk.EndAt,
+		Seq:                     chunk.ChunkIndex,
+		Score:                   score,
+		MatchType:               matchType,
+		Metadata:                knowledge.GetMetadata(),
+		ChunkType:               string(chunk.ChunkType),
+		ParentChunkID:           chunk.ParentChunkID,
+		ImageInfo:               chunk.ImageInfo,
+		KnowledgeFilename:       knowledge.FileName,
+		KnowledgeSource:         knowledge.Source,
+		KnowledgeChannel:        knowledge.Channel,
+		KnowledgeDescription:    knowledge.Description,
+		KnowledgeCustomMetadata: knowledge.CustomMetadataText(),
+		ChunkMetadata:           chunk.Metadata,
+		MatchedContent:          matchedContent,
+		KnowledgeBaseID:         knowledge.KnowledgeBaseID,
 	}
 }
 
 // isSearchableChunk checks if a chunk type should be included in search results.
 func (s *knowledgeBaseService) isSearchableChunk(chunk *types.Chunk) bool {
+	if chunk == nil || !chunk.IsEnabled {
+		return false
+	}
+	// An edit is persisted before its retrieval artifacts are synchronized.
+	// Do not hydrate stale vector hits while that synchronization is pending or
+	// failed. Empty is accepted for legacy rows created before index_status.
+	if chunk.IndexStatus == "processing" || chunk.IndexStatus == "failed" {
+		return false
+	}
 	return slices.Contains([]types.ChunkType{
 		types.ChunkTypeText, types.ChunkTypeSummary,
 		types.ChunkTypeTableColumn, types.ChunkTypeTableSummary,

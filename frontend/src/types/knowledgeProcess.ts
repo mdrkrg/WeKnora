@@ -3,6 +3,7 @@
 export interface ParserEngineRule {
   file_types: string[]
   engine: string
+  xlsx_first_row_as_header?: boolean
 }
 
 export interface ChunkingConfigOverride {
@@ -59,6 +60,7 @@ export interface ExtractConfigOverride {
 }
 
 export interface KnowledgeProcessOverrides {
+  summary_enabled?: boolean
   parser_engine_rules?: ParserEngineRule[]
   chunking_config?: ChunkingConfigOverride
   enable_multimodel?: boolean

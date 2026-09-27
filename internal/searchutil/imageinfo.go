@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -14,12 +15,41 @@ import (
 // MarkdownImageRegex matches Markdown image links: ![alt](url)
 var MarkdownImageRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 
+// HTMLImageSrcRegex matches an HTML <img> tag with a quoted src attribute.
+// Documents that rely on surrounding markup for layout embed their screenshots
+// this way, so image-derived text has to be matched back to these tags as well
+// as to Markdown image links.
+//
+// Submatches: 1 = attributes before src, 2 = the src value, 3 = attributes
+// after. Callers index the value through HTMLImageSrcURLGroup rather than
+// assuming a position.
+//
+// src must be preceded by whitespace so that data-src and other hyphenated
+// attribute names are not mistaken for it — matching those would capture a
+// lazy-loading placeholder and leave the real src unvisited. An unquoted src
+// and a srcset-only tag are deliberately out of scope; both are rare in
+// authored documents and matching them reliably needs an HTML parser.
+//
+// Both this package and the document parser share this one definition. Two
+// copies would be free to drift, and an image the parser stores but the
+// enricher cannot match back is exactly the kind of gap this exists to close.
+var HTMLImageSrcRegex = regexp.MustCompile(`(?i)<img\b([^>]*?)\ssrc\s*=\s*['"]([^'"]+)['"]([^>]*)>`)
+
+// HTMLImageSrcURLGroup is the submatch index of the src value in
+// HTMLImageSrcRegex.
+const HTMLImageSrcURLGroup = 2
+
 // CollectImageInfoByChunkIDs collects merged image_info JSON for each given
 // chunk ID by querying child chunks (image_ocr / image_caption). It supports
 // two-level resolution:
 //   - If chunkIDs are text chunks, their direct children are image chunks → one query.
 //   - If chunkIDs are parent_text chunks, their children are text chunks
 //     whose children are image chunks → two queries.
+//
+// Disabled children are skipped at both levels. Removing an image from a chunk
+// disables its image_ocr / image_caption children (syncEditedChunkImages), and
+// disabling a text chunk disables them too; honoring that flag here is what
+// keeps a deleted image out of retrieval, summaries and model context.
 //
 // Returns a map of input chunkID → merged image_info JSON string.
 func CollectImageInfoByChunkIDs(
@@ -28,11 +58,34 @@ func CollectImageInfoByChunkIDs(
 	tenantID uint64,
 	chunkIDs []string,
 ) map[string]string {
+	return collectImageInfoByChunkIDs(chunkIDs, func(parentIDs []string) ([]*types.Chunk, error) {
+		return chunkRepo.ListChunksByParentIDs(ctx, tenantID, parentIDs)
+	})
+}
+
+// CollectImageInfoByChunkIDsOnly is the shared-KB variant of
+// CollectImageInfoByChunkIDs: the chunk IDs can belong to an org-shared KB
+// owned by another workspace, so the child lookup must not filter by the
+// caller's tenant (#3342).
+func CollectImageInfoByChunkIDsOnly(
+	ctx context.Context,
+	chunkRepo interfaces.ChunkRepository,
+	chunkIDs []string,
+) map[string]string {
+	return collectImageInfoByChunkIDs(chunkIDs, func(parentIDs []string) ([]*types.Chunk, error) {
+		return chunkRepo.ListChunksByParentIDsOnly(ctx, parentIDs)
+	})
+}
+
+func collectImageInfoByChunkIDs(
+	chunkIDs []string,
+	listChildren func(parentIDs []string) ([]*types.Chunk, error),
+) map[string]string {
 	if len(chunkIDs) == 0 {
 		return nil
 	}
 
-	children, err := chunkRepo.ListChunksByParentIDs(ctx, tenantID, chunkIDs)
+	children, err := listChildren(chunkIDs)
 	if err != nil || len(children) == 0 {
 		return nil
 	}
@@ -82,6 +135,9 @@ func CollectImageInfoByChunkIDs(
 	textToParent := make(map[string]string)
 
 	for _, child := range children {
+		if !child.IsEnabled {
+			continue
+		}
 		switch child.ChunkType {
 		case types.ChunkTypeImageOCR, types.ChunkTypeImageCaption:
 			addInfo(child.ParentChunkID, child)
@@ -92,9 +148,12 @@ func CollectImageInfoByChunkIDs(
 	}
 
 	if len(textChildIDs) > 0 {
-		grandChildren, err := chunkRepo.ListChunksByParentIDs(ctx, tenantID, textChildIDs)
+		grandChildren, err := listChildren(textChildIDs)
 		if err == nil {
 			for _, gc := range grandChildren {
+				if !gc.IsEnabled {
+					continue
+				}
 				if gc.ChunkType != types.ChunkTypeImageOCR && gc.ChunkType != types.ChunkTypeImageCaption {
 					continue
 				}
@@ -195,6 +254,39 @@ func MergeImageInfoJSON(perChunk map[string]string) string {
 	return string(data)
 }
 
+// ClearImageInfoTextMatchingBody removes the OCR or caption field that exactly
+// matches recognized from image_info. Merge re-attaches that body onto Content
+// for image_ocr / image_caption hits; chat enrichment would otherwise inject
+// the same text again from ImageInfo.
+func ClearImageInfoTextMatchingBody(imageInfoJSON, recognized, chunkType string) string {
+	if imageInfoJSON == "" || recognized == "" {
+		return imageInfoJSON
+	}
+	var infos []types.ImageInfo
+	if err := json.Unmarshal([]byte(imageInfoJSON), &infos); err != nil || len(infos) == 0 {
+		return imageInfoJSON
+	}
+	changed := false
+	for i := range infos {
+		switch chunkType {
+		case string(types.ChunkTypeImageOCR):
+			if infos[i].OCRText == recognized {
+				infos[i].OCRText = ""
+				changed = true
+			}
+		case string(types.ChunkTypeImageCaption):
+			if infos[i].Caption == recognized {
+				infos[i].Caption = ""
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return imageInfoJSON
+	}
+	return marshalImageInfos(infos)
+}
+
 // EnrichContentWithImageInfo embeds image info as XML tags into text content.
 // Inline Markdown image links get wrapped in <image> with <image_caption> / <image_ocr>;
 // images not found in content are appended as <image> blocks.
@@ -288,22 +380,52 @@ func EnrichContentWithImageInfoForChat(content string, imageInfoJSON string) str
 		}
 	}
 
-	content = MarkdownImageRegex.ReplaceAllStringFunc(content, func(markdownImage string) string {
-		match := MarkdownImageRegex.FindStringSubmatch(markdownImage)
-		if len(match) < 3 {
-			return markdownImage
+	// Screenshots embedded as HTML carry their image_info the same way as
+	// Markdown links: without covering both, a document that keeps its images in
+	// <img> tags reaches the model as bare markup with the caption and OCR text
+	// stripped out, even though the analysis ran and the entry is right here.
+	//
+	// Both syntaxes are located against the ORIGINAL content and spliced in one
+	// right-to-left pass. Running one regex over the other's output would let a
+	// metadata block that itself quotes an image reference be rescanned, cutting
+	// the OCR sentence in half and injecting the same block twice.
+	type injection struct {
+		at   int
+		text string
+	}
+	var injections []injection
+
+	// trim is applied to HTML only. An attribute value may be padded, while a
+	// Markdown target is looked up exactly as written so that the keys this
+	// function matches on stay the ones it has always matched on.
+	appendFor := func(locs [][]int, urlGroup int, trim bool) {
+		for _, loc := range locs {
+			start, end := loc[2*urlGroup], loc[2*urlGroup+1]
+			if start < 0 {
+				continue
+			}
+			key := content[start:end]
+			if trim {
+				key = strings.TrimSpace(key)
+			}
+			imgInfo, found := imageInfoMap[key]
+			if !found || imgInfo == nil {
+				continue
+			}
+			metadata := buildImageInfoMarkdownMetadata(imgInfo)
+			if metadata == "" {
+				continue
+			}
+			injections = append(injections, injection{at: loc[1], text: "\n\n" + metadata})
 		}
-		imgURL := match[2]
-		imgInfo, found := imageInfoMap[imgURL]
-		if !found || imgInfo == nil {
-			return markdownImage
-		}
-		metadata := buildImageInfoMarkdownMetadata(imgInfo)
-		if metadata == "" {
-			return markdownImage
-		}
-		return markdownImage + "\n\n" + metadata
-	})
+	}
+	appendFor(MarkdownImageRegex.FindAllStringSubmatchIndex(content, -1), 2, false)
+	appendFor(HTMLImageSrcRegex.FindAllStringSubmatchIndex(content, -1), HTMLImageSrcURLGroup, true)
+
+	sort.Slice(injections, func(i, j int) bool { return injections[i].at > injections[j].at })
+	for _, inj := range injections {
+		content = content[:inj.at] + inj.text + content[inj.at:]
+	}
 	return content
 }
 
